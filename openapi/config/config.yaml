@@ -1,0 +1,8 @@
+package: CommonData
+
+generate:
+  gin-server: true
+  models: true       # Go 구조체 생성
+
+output-options:
+  skip-prune: true    # paths가 없어도 모든 Schema를 강제로 생성
