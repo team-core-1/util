@@ -72,7 +72,7 @@ func TestQueue_Test1(t *testing.T) {
 
 			for j := 0; j < loopCount; j++ {
 				// Enqueue 시험
-				err = q.Enqueue(data)
+				err := q.Enqueue(data)
 				if err != nil {
 					enqueueFailCount.Add(1)
 					continue
