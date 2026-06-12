@@ -5,11 +5,11 @@ import (
 )
 
 var (
-	QueueErrInvalidCapa  = errors.New("Queue fail(invalid capacity)")
-	QueueErrNil          = errors.New("Queue fail(nil)")
-	QueueErrClosed       = errors.New("Queue fail(closed)")
-	QueueErrEnqueueFull  = errors.New("Enqueue fail(full)")
-	QueueErrDequeueEmpty = errors.New("Dequeue fail(empty)")
+	ErrInvalidCapa  = errors.New("Queue fail(invalid capacity)")
+	ErrNil          = errors.New("Queue fail(nil)")
+	ErrClosed       = errors.New("Queue fail(closed)")
+	ErrEnqueueFull  = errors.New("Enqueue fail(full)")
+	ErrDequeueEmpty = errors.New("Dequeue fail(empty)")
 )
 
 type Queue[T any] struct {
@@ -18,7 +18,7 @@ type Queue[T any] struct {
 
 func New[T any](capacity uint32) (*Queue[T], error) {
 	if capacity == 0 {
-		return nil, QueueErrInvalidCapa
+		return nil, ErrInvalidCapa
 	}
 
 	ch := make(chan T, capacity)
@@ -42,12 +42,12 @@ func (q *Queue[T]) Close() {
 
 func (q *Queue[T]) Enqueue(data T) (err error) {
 	if q == nil {
-		return QueueErrNil
+		return ErrNil
 	}
 
 	defer func() {
 		if r := recover(); r != nil {
-			err = QueueErrClosed
+			err = ErrClosed
 		}
 	}()
 
@@ -55,23 +55,23 @@ func (q *Queue[T]) Enqueue(data T) (err error) {
 	case q.ch <- data:
 		return nil
 	default:
-		return QueueErrEnqueueFull
+		return ErrEnqueueFull
 	}
 }
 
 func (q *Queue[T]) Dequeue() (data T, err error) {
 	if q == nil {
-		return data, QueueErrNil
+		return data, ErrNil
 	}
 
 	select {
 	case d, ok := <-q.ch:
 		if ok == false {
-			return data, QueueErrClosed
+			return data, ErrClosed
 		}
 		return d, nil
 	default:
-		return data, QueueErrDequeueEmpty
+		return data, ErrDequeueEmpty
 	}
 }
 

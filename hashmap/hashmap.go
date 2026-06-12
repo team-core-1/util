@@ -139,6 +139,30 @@ func (hm *HashMap[K, V]) Do(key K, f func(K, V, any) (int, error), arg any) (int
 	return 0, ErrKeyNotFound
 }
 
+func (hm *HashMap[K, V]) Len() int {
+	if hm == nil {
+		return 0
+	}
+
+	if hm.m == nil {
+		return 0
+	}
+
+	return len(hm.m)
+}
+
+func (hm *HashMap[K, V]) Cap() int {
+	if hm == nil {
+		return 0
+	}
+
+	if hm.m == nil {
+		return 0
+	}
+
+	return hm.cap
+}
+
 func (hm *HashMap[K, V]) AllSafe(f func(K, V, any) (int, error), arg any) (sum int, err error) {
 	if hm == nil {
 		return 0, ErrNil
