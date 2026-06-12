@@ -59,19 +59,21 @@ func (q *Queue[T]) Enqueue(data T) (err error) {
 	}
 }
 
-func (q *Queue[T]) Dequeue() (data T, err error) {
+func (q *Queue[T]) Dequeue() (T, error) {
+	var zero T
+
 	if q == nil {
-		return data, ErrNil
+		return zero, ErrNil
 	}
 
 	select {
-	case d, ok := <-q.ch:
+	case data, ok := <-q.ch:
 		if ok == false {
-			return data, ErrClosed
+			return zero, ErrClosed
 		}
-		return d, nil
+		return data, nil
 	default:
-		return data, ErrDequeueEmpty
+		return zero, ErrDequeueEmpty
 	}
 }
 

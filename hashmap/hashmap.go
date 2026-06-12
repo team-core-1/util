@@ -41,6 +41,12 @@ func (hm *HashMap[K, V]) Close() {
 		return
 	}
 
+	if hm.m == nil {
+		return
+	}
+
+	clear(hm.m)
+
 	hm.m = nil
 }
 
@@ -66,20 +72,22 @@ func (hm *HashMap[K, V]) Put(key K, value V) error {
 	return nil
 }
 
-func (hm *HashMap[K, V]) Get(key K) (value V, err error) {
+func (hm *HashMap[K, V]) Get(key K) (V, error) {
+	var zero V
+
 	if hm == nil {
-		return value, ErrNil
+		return zero, ErrNil
 	}
 
 	if hm.m == nil {
-		return value, ErrClosed
+		return zero, ErrClosed
 	}
 
-	if v, ok := hm.m[key]; ok {
-		return v, nil
+	if value, ok := hm.m[key]; ok {
+		return value, nil
 	}
 
-	return value, ErrKeyNotFound
+	return zero, ErrKeyNotFound
 }
 
 func (hm *HashMap[K, V]) Delete(key K) {
@@ -94,7 +102,7 @@ func (hm *HashMap[K, V]) Delete(key K) {
 	delete(hm.m, key)
 }
 
-func (hm *HashMap[K, V]) All(f func(K, V, any) (int, error), arg any) (sum int, err error) {
+func (hm *HashMap[K, V]) All(f func(K, V, any) (int, error), arg any) (int, error) {
 	if hm == nil {
 		return 0, ErrNil
 	}
@@ -107,12 +115,13 @@ func (hm *HashMap[K, V]) All(f func(K, V, any) (int, error), arg any) (sum int, 
 		return 0, ErrCbNil
 	}
 
-	for k, v := range hm.m {
-		ret, err := f(k, v, arg)
+	sum := 0
+	for key, value := range hm.m {
+		res, err := f(key, value, arg)
 		if err != nil {
 			return sum, err
 		}
-		sum += ret
+		sum += res
 	}
 
 	return sum, nil
