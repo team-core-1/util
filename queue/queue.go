@@ -16,8 +16,8 @@ type Queue[T any] struct {
 	ch chan T
 }
 
-func New[T any](capacity uint32) (*Queue[T], error) {
-	if capacity == 0 {
+func New[T any](capacity int) (*Queue[T], error) {
+	if capacity <= 0 {
 		return nil, ErrInvalidCapa
 	}
 

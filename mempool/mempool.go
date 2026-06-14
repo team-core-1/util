@@ -8,8 +8,8 @@ import (
 )
 
 var (
-	ErrMpoolNil = errors.New("MemPool fail(nil)")
-	ErrEmpty    = errors.New("MemPool fail(empty)")
+	ErrNil   = errors.New("MemPool fail(nil)")
+	ErrEmpty = errors.New("MemPool fail(empty)")
 )
 
 type cell[T any] struct {
@@ -45,7 +45,7 @@ func New[T any](capacity uint32) (*MemPool[T], error) {
 // 동작 중에는 가능하면 사용하지 않아야 한다.
 func (mp *MemPool[T]) Close() error {
 	if mp == nil {
-		return ErrMpoolNil
+		return ErrNil
 	}
 
 	mp.queue = nil
@@ -55,7 +55,7 @@ func (mp *MemPool[T]) Close() error {
 
 func (mp *MemPool[T]) Get() (mem *T, key uint64, err error) {
 	if mp == nil {
-		return nil, 0, ErrMpoolNil
+		return nil, 0, ErrNil
 	}
 
 	var cell *cell[T] = nil
