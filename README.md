@@ -5,9 +5,12 @@ Go utility
 * version: v1.25.5
 
 ## Type
-* openapi
+* hashmap
+* indexpool
 * mempool
+* openapi
 * queue
+* timer
 
 ## Test
 1. 파일과 테스트 함수 지정
