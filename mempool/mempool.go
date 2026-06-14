@@ -8,8 +8,9 @@ import (
 )
 
 var (
-	ErrNil   = errors.New("MemPool fail(nil)")
-	ErrEmpty = errors.New("MemPool fail(empty)")
+	ErrInvalidCap = errors.New("MemPool fail(invalid capacity)")
+	ErrNil        = errors.New("MemPool fail(nil)")
+	ErrEmpty      = errors.New("MemPool fail(empty)")
 )
 
 type cell[T any] struct {
@@ -23,7 +24,11 @@ type MemPool[T any] struct {
 	cells [](cell[T])
 }
 
-func New[T any](capacity uint32) (*MemPool[T], error) {
+func New[T any](capacity int) (*MemPool[T], error) {
+	if capacity <= 0 {
+		return nil, ErrInvalidCap
+	}
+
 	queue := make(chan *cell[T], capacity)
 	cells := make([](cell[T]), capacity)
 
