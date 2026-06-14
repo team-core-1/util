@@ -77,6 +77,14 @@ func (q *Queue[T]) Dequeue() (T, error) {
 	}
 }
 
+func (q *Queue[T]) C() <-chan T {
+	if q == nil {
+		return nil
+	}
+
+	return q.ch
+}
+
 func (q *Queue[T]) Len() int {
 	if q == nil {
 		return 0
