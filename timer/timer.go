@@ -24,7 +24,7 @@ type TimerEngine[T any] struct {
 }
 
 type Timer struct {
-	t        atomic.Pointer[timingwheel.Timer]
+	twt      atomic.Pointer[timingwheel.Timer]
 	canceled atomic.Bool
 }
 
@@ -42,13 +42,13 @@ func New[T any](tw *timingwheel.TimingWheel, capacity int) (*TimerEngine[T], err
 		return nil, err
 	}
 
-	t := &TimerEngine[T]{
+	te := &TimerEngine[T]{
 		tw:  tw,
 		q:   q,
 		cap: capacity,
 	}
 
-	return t, nil
+	return te, nil
 }
 
 func (te *TimerEngine[T]) C() <-chan T {
@@ -79,27 +79,37 @@ func (te *TimerEngine[T]) Set(d time.Duration, key T) (*Timer, error) {
 		if timer.canceled.CompareAndSwap(false, true) {
 			te.len.Add(^uint32(0)) // Add(-1)
 			_ = te.q.Enqueue(key)
-			timer.t.Store(nil)
+			timer.twt.Store(nil)
 		}
 	}
 
-	timer.t.Store(te.tw.AfterFunc(d, f))
+	twt := te.tw.AfterFunc(d, f)
+	timer.twt.Store(twt)
+
+	// 타이머를 생성하는 찰나에 이미 만료(timeout)된 경우를 대비
+	// f()가 Store(nil)을 먼저 수행하고, 여기서 다시 Store(twt)를 했을 경우를 방어함
+	if timer.canceled.Load() {
+		// 이미 만료되었으므로 Stop() 호출 없이 포인터만 정리
+		timer.twt.Store(nil)
+	}
 
 	return timer, nil
 }
 
+// Cancel은 Set이 완료된 후 timeout과 경합 체크 필요
 func (te *TimerEngine[T]) Cancel(timer *Timer) {
 	if (te == nil) || (timer == nil) {
 		return
 	}
 
+	// 이미 만료되었거나 취소된 경우 중복 처리 방지
 	if !timer.canceled.CompareAndSwap(false, true) {
 		return
 	}
 
-	te.len.Add(^uint32(0))                // Add(-1)
-	if t := timer.t.Swap(nil); t != nil { // t를 nil로 변경하고, t의 이전 값이 있으면 Stop 처리
-		t.Stop()
+	te.len.Add(^uint32(0))                      // uint32에서의 Add(-1) 효과
+	if twt := timer.twt.Swap(nil); twt != nil { // t를 nil로 변경하고, t의 이전 값이 있으면 Stop 처리
+		twt.Stop()
 	}
 }
 
