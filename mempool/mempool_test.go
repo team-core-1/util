@@ -6,6 +6,7 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
+	"unsafe"
 )
 
 type myStruct struct {
@@ -60,7 +61,7 @@ func TestMemPool_Test1(t *testing.T) {
 
 			for j := 0; j < 10; j++ {
 				// Get 시험
-				_, key, err := mpool.Get()
+				mem, err := mpool.Get()
 				if err != nil {
 					getFailCount.Add(1)
 					continue
@@ -71,7 +72,7 @@ func TestMemPool_Test1(t *testing.T) {
 				runtime.Gosched()
 
 				// Put 시험
-				err = mpool.Put(key)
+				err = mpool.Put(mem)
 				if err != nil {
 					putFailCount.Add(1)
 				} else {
@@ -79,7 +80,7 @@ func TestMemPool_Test1(t *testing.T) {
 				}
 
 				// 중복 Put 시험
-				err = mpool.Put(key)
+				err = mpool.Put(mem)
 				if err != nil {
 					putFailDupKeyCount.Add(1)
 				} else {
@@ -88,19 +89,21 @@ func TestMemPool_Test1(t *testing.T) {
 			}
 		}(i)
 
-		// 잘못된 key로 Put 시험
+		// 잘못된 주소로 Put 시험 (풀 외부 메모리)
 		wg.Add(1)
 		go func(id int) {
 			defer wg.Done()
 			<-startSignal
 
 			for j := 0; j < 10; j++ {
-				wrongKey := packKey(i+j, uint32((id+i+j)*7))
-				err := mpool.Put(wrongKey)
+				// 실제 메모리 할당 없이 임의의 주소값을 생성하여 전달
+				// 이 주소는 mpool의 baseAddr 범위 밖이거나 정렬(Alignment)이 맞지 않아 거부되어야 함
+				badPtr := (*myStruct)(unsafe.Pointer(uintptr(0x12345678 + id*100 + j)))
+				err := mpool.Put(badPtr)
 				if err != nil {
 					putFailWrongKeyCount.Add(1)
 				} else {
-					t.Errorf("잘못된 키로 Put 함수가 처리됨!!! (id:%d key:%x)", id, wrongKey)
+					t.Errorf("잘못된 주소로 Put 함수가 처리됨!!! (id:%d ptr:%p)", id, badPtr)
 				}
 			}
 		}(i)
@@ -119,11 +122,11 @@ func TestMemPool_Test1(t *testing.T) {
 	t.Logf("  - 성공 : %d 회", getSuccCount.Load())
 	t.Logf("  - 실패 : %d 회", getFailCount.Load())
 	t.Logf("--------------------------------------------------")
-	t.Logf(" 총 Put 시도 : %d 회", (getSuccCount.Load()*2)+(goroutineCount*10)*1)
+	t.Logf(" 총 Put 시도 (정상+중복+외부) : %d 회", getSuccCount.Load()*2+putFailWrongKeyCount.Load())
 	t.Logf("  - 성공 : %d 회", putSuccCount.Load())
 	t.Logf("  - 실패 : %d 회", putFailCount.Load())
 	t.Logf("  - 중복키 차단 성공: %d 회", putFailDupKeyCount.Load())
-	t.Logf("  - 가짜키 차단 성공: %d 회", putFailWrongKeyCount.Load())
+	t.Logf("  - 잘못된 주소 차단 성공: %d 회", putFailWrongKeyCount.Load())
 	t.Logf("==================================================")
 
 	if getSuccCount.Load() != putSuccCount.Load() {
@@ -134,7 +137,7 @@ func TestMemPool_Test1(t *testing.T) {
 	t.Logf("==================================================")
 
 	// 현재 풀 안에 자원이 들어있는지 (다시 Get이 되는지) 확인
-	mem, _, err := mpool.Get()
+	mem, err := mpool.Get()
 	if err != nil {
 		t.Errorf("자원 소멸: 경합이 끝난 후 풀에 자원이 유실되어 비어있습니다: %v", err)
 	} else if mem == nil {
@@ -145,6 +148,7 @@ func TestMemPool_Test1(t *testing.T) {
 	if err := mpool.Close(); err != nil {
 		t.Fatalf("Close 실패: %+v", err)
 	}
+	mpool = nil // 객체 참조를 제거해야 GC가 메모리를 회수함
 
 	for i := 0; i < 1; i++ {
 		runtime.GC()
