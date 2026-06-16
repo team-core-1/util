@@ -14,9 +14,8 @@ var (
 )
 
 type IndexPool[T any] struct {
-	q     chan int
-	seq   []atomic.Uint32
-	slots []T
+	q   chan int
+	seq []atomic.Uint32
 }
 
 func New[T any](capacity int) (*IndexPool[T], error) {
@@ -26,17 +25,15 @@ func New[T any](capacity int) (*IndexPool[T], error) {
 
 	q := make(chan int, capacity)
 	seq := make([]atomic.Uint32, capacity)
-	slots := make([]T, capacity)
 
-	for i := range slots {
+	for i := 0; i < capacity; i++ {
 		seq[i].Store(rand.Uint32())
 		q <- i
 	}
 
 	return &IndexPool[T]{
-		q:     q,
-		seq:   seq,
-		slots: slots,
+		q:   q,
+		seq: seq,
 	}, nil
 }
 
@@ -58,7 +55,7 @@ func (ip *IndexPool[T]) Put(index int, key uint32) (err error) {
 		return fmt.Errorf("IndexPool Put(%d) fail(nil)", index)
 	}
 
-	if (index < 0) || (index >= cap(ip.slots)) {
+	if (index < 0) || (index >= cap(ip.seq)) {
 		return fmt.Errorf("IndexPool Put(%d) fail(wrong index)", index)
 	}
 
@@ -66,13 +63,11 @@ func (ip *IndexPool[T]) Put(index int, key uint32) (err error) {
 		return fmt.Errorf("IndexPool Put(%d) fail(duplicated index)", index)
 	}
 
-	ip.slots[index] = *new(T)
-
 	select {
 	case ip.q <- index:
 		return nil
 	default:
-		// CAS를 통과한 유효한 slots인데, full이 발생하는 경우는 발생해서는 안됨
+		// CAS를 통과한 유효한 index인데, full이 발생하는 경우는 발생해서는 안됨
 		ip.seq[index].Store(key)
 		return fmt.Errorf("IndexPool Put(%d) fail(full)", index)
 	}
