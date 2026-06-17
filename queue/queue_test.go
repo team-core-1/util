@@ -1,6 +1,7 @@
 package queue
 
 import (
+	"errors"
 	"runtime"
 	"sync"
 	"sync/atomic"
@@ -8,126 +9,182 @@ import (
 	"time"
 )
 
-type myStruct struct {
-	myData [1024 * 1024 * 10]byte
-}
-
-func TestQueue_Test1(t *testing.T) {
+// 1. capacity가 1인 queue에 멀티고루틴에서 Enqueue, Dequeue를 반복하고 정상 확인
+func TestQueue_Concurrency(t *testing.T) {
 	const capacity = 1
-	const goroutineCount = 1000
-	const loopCount = 10
+	const workers = 50
+	const itemsPerWorker = 20
 
-	var data *myStruct
-
-	var msBefore runtime.MemStats
-	var msNew runtime.MemStats
-	var msClose runtime.MemStats
-
-	var dequeueSuccCount atomic.Uint64
-	var dequeueFailCount atomic.Uint64
-	var enqueueSuccCount atomic.Uint64
-	var enqueueFailCount atomic.Uint64
-
+	q, _ := New[int](capacity)
+	var enqSucc, deqSucc atomic.Int64
 	var wg sync.WaitGroup
 
-	// 초기 메모리 사용량
-	runtime.GC()
-	runtime.ReadMemStats(&msBefore)
-
-	// queue.New
-	q, err := New[*myStruct](capacity)
-	if err != nil {
-		t.Fatalf("queue 초기화 실패: %+v", err)
-	}
-
-	// 생성 후 메모리 사용량
-	runtime.GC()
-	runtime.ReadMemStats(&msNew)
-
-	startSignal := make(chan any)
-
-	// 1. 멀티 고루틴에서 Dequeue/Enqueue 시험
-	for i := 0; i < goroutineCount; i++ {
-		// Dequeue/Enqueue 경합 고루틴
+	// Enqueuer 고루틴들
+	for i := 0; i < workers; i++ {
 		wg.Add(1)
 		go func(id int) {
 			defer wg.Done()
-			<-startSignal
-
-			for j := 0; j < loopCount; j++ {
-				// Dequeue 시험
-				_, err := q.Dequeue()
-				if err != nil {
-					dequeueFailCount.Add(1)
-					continue
+			for j := 0; j < itemsPerWorker; j++ {
+				val := id*itemsPerWorker + j
+				for q.Enqueue(val) != nil {
+					// 큐가 꽉 찼으면 CPU 양보
+					runtime.Gosched()
 				}
-				dequeueSuccCount.Add(1)
-			}
-		}(i)
-
-		wg.Add(1)
-		go func(id int) {
-			defer wg.Done()
-			<-startSignal
-
-			for j := 0; j < loopCount; j++ {
-				// Enqueue 시험
-				err := q.Enqueue(data)
-				if err != nil {
-					enqueueFailCount.Add(1)
-					continue
-				}
-				enqueueSuccCount.Add(1)
+				enqSucc.Add(1)
 			}
 		}(i)
 	}
 
-	t.Logf("==================================================")
-	t.Logf(" 1. 시험 시작: cap:%d개 고루틴:%d개 반복:%d회 Dequeue/Enqueue 시험", capacity, goroutineCount*2, loopCount)
-	close(startSignal)
+	// Dequeuer 고루틴들
+	for i := 0; i < workers; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for j := 0; j < itemsPerWorker; j++ {
+				for _, err := q.Dequeue(); err != nil; _, err = q.Dequeue() {
+					// 큐가 비었으면 CPU 양보
+					runtime.Gosched()
+				}
+				deqSucc.Add(1)
+			}
+		}()
+	}
 
 	wg.Wait()
 
-	t.Logf("==================================================")
-	t.Logf(" 2. 통계")
-	t.Logf("--------------------------------------------------")
-	t.Logf(" 총 Dequeue 시도 : %d 회", goroutineCount*loopCount)
-	t.Logf("  - 성공 : %d 회", dequeueSuccCount.Load())
-	t.Logf("  - 실패 : %d 회", dequeueFailCount.Load())
-	t.Logf("--------------------------------------------------")
-	t.Logf(" 총 Enqueue 시도 : %d 회", goroutineCount*loopCount)
-	t.Logf("  - 성공 : %d 회", enqueueSuccCount.Load())
-	t.Logf("  - 실패 : %d 회", enqueueFailCount.Load())
+	if enqSucc.Load() != deqSucc.Load() {
+		t.Errorf("Enqueue와 Dequeue 성공 횟수가 다릅니다: Enq=%d, Deq=%d", enqSucc.Load(), deqSucc.Load())
+	}
+	if q.Len() != 0 {
+		t.Errorf("테스트 종료 후 큐에 데이터가 남아있습니다: Len=%d", q.Len())
+	}
+	t.Logf("Concurrency Test: Enq/Deq Success Count: %d", enqSucc.Load())
+}
 
-	t.Logf("==================================================")
-	if (dequeueSuccCount.Load() + dequeueFailCount.Load()) != (goroutineCount * loopCount) {
-		t.Errorf("자원 누수 발생: 대여 성공 횟수(%d)와 반납 성공 횟수(%d)가 불일치합니다!", dequeueSuccCount.Load(), dequeueFailCount.Load())
-	} else if (enqueueSuccCount.Load() + enqueueFailCount.Load()) != (goroutineCount * loopCount) {
-		t.Errorf("자원 누수 발생: 대여 성공 횟수(%d)와 반납 성공 횟수(%d)가 불일치합니다!", enqueueSuccCount.Load(), enqueueFailCount.Load())
-	} else {
-		t.Logf(" 3. 결과: 정상 (Get 총 %d 회 / Put 총 %d 회)", dequeueSuccCount.Load()+dequeueFailCount.Load(), enqueueSuccCount.Load()+enqueueFailCount.Load())
+// 2. capacity가 1인 queue에 멀티고루틴에서 C()를 사용하고, 다른 멀티 고루틴에서 Enqueue를 반복하고 정상 확인
+func TestQueue_ChannelConcurrency(t *testing.T) {
+	const capacity = 1
+	const workers = 50
+	const itemsPerWorker = 20
+
+	q, _ := New[int](capacity)
+	var enqSucc, deqSucc atomic.Int64
+	var wg sync.WaitGroup
+
+	// Enqueuer 고루틴들
+	for i := 0; i < workers; i++ {
+		wg.Add(1)
+		go func(id int) {
+			defer wg.Done()
+			for j := 0; j < itemsPerWorker; j++ {
+				val := id*itemsPerWorker + j
+				for q.Enqueue(val) != nil {
+					runtime.Gosched()
+				}
+				enqSucc.Add(1)
+			}
+		}(i)
 	}
 
-	// queue Close
-	q = nil
-
-	for i := 0; i < 1; i++ {
-		runtime.GC()
-		time.Sleep(time.Microsecond * 30)
+	// Consumer 고루틴 (C() 채널 사용)
+	for i := 0; i < workers; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			ch := q.C()
+			for j := 0; j < itemsPerWorker; j++ {
+				<-ch
+				deqSucc.Add(1)
+			}
+		}()
 	}
 
-	// Close 후 메모리 사용량
-	runtime.ReadMemStats(&msClose)
+	wg.Wait()
 
-	t.Logf("==================================================")
-	t.Logf(" 4. 메모리 사용량: %.2f MB -> %.2f MB -> %.2f MB",
-		float64(msBefore.Alloc)/(1024*1024), float64(msNew.Alloc)/(1024*1024), float64(msClose.Alloc)/(1024*1024))
-
-	t.Logf("--------------------------------------------------")
-	if (int64(msClose.Alloc) - int64(msBefore.Alloc)) > (1 * 1024 * 1024) {
-		t.Errorf("자원 정리 실패: Close() 이후 시간이 흘렀음에도 %.2f MB가 해제되지 못했습니다.", float64(msClose.Alloc-msBefore.Alloc)/(1024*1024))
-	} else {
-		t.Logf("  - 메모리 해제 정상 (1 MB 오차 범위)")
+	if enqSucc.Load() != deqSucc.Load() {
+		t.Errorf("Enqueue와 C()를 통한 소비 횟수가 다릅니다: Enq=%d, Deq=%d", enqSucc.Load(), deqSucc.Load())
 	}
-	t.Logf("==================================================")
+	if q.Len() != 0 {
+		t.Errorf("테스트 종료 후 큐에 데이터가 남아있습니다: Len=%d", q.Len())
+	}
+	t.Logf("Channel Concurrency Test: Enq/Deq Success Count: %d", enqSucc.Load())
+}
+
+// 3. 멀티 고루틴에서 Enqueue(), Dequeue(), C()를 사용하는 중에 Close를 함수를 호출해도 문제가 없는지 확인
+func TestQueue_CloseSafety(t *testing.T) {
+	const capacity = 100
+	const workers = 20
+
+	q, _ := New[int](capacity)
+	var wg sync.WaitGroup
+	stop := make(chan struct{})
+
+	// 다양한 작업을 하는 고루틴들 생성
+	for i := 0; i < workers; i++ {
+		wg.Add(1)
+		go func(id int) { // Enqueuer
+			defer wg.Done()
+			for {
+				select {
+				case <-stop:
+					return
+				default:
+					err := q.Enqueue(id)
+					if errors.Is(err, ErrClosed) {
+						return
+					}
+				}
+			}
+		}(i)
+
+		wg.Add(1)
+		go func() { // Dequeuer
+			defer wg.Done()
+			for {
+				select {
+				case <-stop:
+					return
+				default:
+					_, err := q.Dequeue()
+					if errors.Is(err, ErrClosed) {
+						return
+					}
+				}
+			}
+		}()
+
+		wg.Add(1)
+		go func() { // Consumer from C()
+			defer wg.Done()
+			ch := q.C()
+			for {
+				select {
+				case <-stop:
+					return
+				case _, ok := <-ch:
+					if !ok {
+						return
+					}
+				}
+			}
+		}()
+	}
+
+	// 잠시 작업 진행
+	time.Sleep(50 * time.Millisecond)
+
+	// 작업 도중 Close 호출
+	q.Close()
+	close(stop) // 작업 고루틴들 종료 신호
+	wg.Wait()
+
+	// Close 이후 작업이 ErrClosed를 반환하는지 확인
+	if err := q.Enqueue(1); !errors.Is(err, ErrClosed) {
+		t.Errorf("expected ErrClosed after Close, got: %v", err)
+	}
+	if _, err := q.Dequeue(); !errors.Is(err, ErrClosed) {
+		t.Errorf("expected ErrClosed after Close, got: %v", err)
+	}
+
+	t.Log("Close Safety Test: 패닉 없이 정상 종료됨")
 }

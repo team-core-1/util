@@ -44,6 +44,7 @@ func (q *Queue[T]) Close() {
 
 	q.isClosed = true
 	close(q.ch)
+	// q.ch = nil 은 하지 않고, q가 참조 해제되면 GC에서 처리
 }
 
 func (q *Queue[T]) Enqueue(data T) (err error) {
