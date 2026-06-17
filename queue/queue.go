@@ -2,29 +2,30 @@ package queue
 
 import (
 	"errors"
+	"sync"
 )
 
 var (
-	ErrInvalidCapa  = errors.New("Queue fail(invalid capacity)")
-	ErrNil          = errors.New("Queue fail(nil)")
-	ErrClosed       = errors.New("Queue fail(closed)")
-	ErrEnqueueFull  = errors.New("Enqueue fail(full)")
-	ErrDequeueEmpty = errors.New("Dequeue fail(empty)")
+	ErrInvalidCap = errors.New("Queue fail(invalid capacity)")
+	ErrNil        = errors.New("Queue fail(nil)")
+	ErrClosed     = errors.New("Queue fail(closed)")
+	ErrFull       = errors.New("Enqueue fail(full)")
+	ErrEmpty      = errors.New("Dequeue fail(empty)")
 )
 
 type Queue[T any] struct {
-	ch chan T
+	lock     sync.RWMutex
+	isClosed bool
+	ch       chan T
 }
 
 func New[T any](capacity int) (*Queue[T], error) {
 	if capacity <= 0 {
-		return nil, ErrInvalidCapa
+		return nil, ErrInvalidCap
 	}
 
-	ch := make(chan T, capacity)
-
 	return &Queue[T]{
-		ch: ch,
+		ch: make(chan T, capacity),
 	}, nil
 }
 
@@ -33,10 +34,15 @@ func (q *Queue[T]) Close() {
 		return
 	}
 
-	defer func() {
-		recover()
-	}()
+	// Lock을 사용해서 채널 close시 race-condition 보호
+	q.lock.Lock()
+	defer q.lock.Unlock()
 
+	if q.isClosed {
+		return
+	}
+
+	q.isClosed = true
 	close(q.ch)
 }
 
@@ -45,17 +51,19 @@ func (q *Queue[T]) Enqueue(data T) (err error) {
 		return ErrNil
 	}
 
-	defer func() {
-		if r := recover(); r != nil {
-			err = ErrClosed
-		}
-	}()
+	// RLock을 사용해도 채널에서 동기화 가능
+	q.lock.RLock()
+	defer q.lock.RUnlock()
+
+	if q.isClosed {
+		return ErrClosed
+	}
 
 	select {
 	case q.ch <- data:
 		return nil
 	default:
-		return ErrEnqueueFull
+		return ErrFull
 	}
 }
 
@@ -66,14 +74,22 @@ func (q *Queue[T]) Dequeue() (T, error) {
 		return zero, ErrNil
 	}
 
+	// RLock을 사용해도 채널에서 동기화 가능
+	q.lock.RLock()
+	defer q.lock.RUnlock()
+
 	select {
 	case data, ok := <-q.ch:
-		if ok == false {
+		// close된 채널에서 처리 가능함
+		if !ok {
 			return zero, ErrClosed
 		}
 		return data, nil
 	default:
-		return zero, ErrDequeueEmpty
+		if q.isClosed {
+			return zero, ErrClosed
+		}
+		return zero, ErrEmpty
 	}
 }
 
@@ -81,6 +97,7 @@ func (q *Queue[T]) C() <-chan T {
 	if q == nil {
 		return nil
 	}
+
 	return q.ch
 }
 
@@ -88,6 +105,11 @@ func (q *Queue[T]) Len() int {
 	if q == nil {
 		return 0
 	}
+
+	q.lock.RLock()
+	defer q.lock.RUnlock()
+
+	// close된 채널에서 처리 가능함
 	return len(q.ch)
 }
 
@@ -95,12 +117,22 @@ func (q *Queue[T]) Cap() int {
 	if q == nil {
 		return 0
 	}
+
+	q.lock.RLock()
+	defer q.lock.RUnlock()
+
+	// close된 채널에서 처리 가능함
 	return cap(q.ch)
 }
 
 func (q *Queue[T]) IsFull() bool {
-	if len(q.ch) < cap(q.ch) {
+	if q == nil {
 		return false
 	}
-	return true
+
+	q.lock.RLock()
+	defer q.lock.RUnlock()
+
+	// close된 채널에서 처리 가능함
+	return len(q.ch) == cap(q.ch)
 }
