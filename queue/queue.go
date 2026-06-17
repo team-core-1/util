@@ -81,7 +81,6 @@ func (q *Queue[T]) C() <-chan T {
 	if q == nil {
 		return nil
 	}
-
 	return q.ch
 }
 
@@ -97,4 +96,11 @@ func (q *Queue[T]) Cap() int {
 		return 0
 	}
 	return cap(q.ch)
+}
+
+func (q *Queue[T]) IsFull() bool {
+	if len(q.ch) < cap(q.ch) {
+		return false
+	}
+	return true
 }
