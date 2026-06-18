@@ -195,6 +195,17 @@ func (q *Queue[T]) IsFull() bool {
 	return len(q.ch) == cap(q.ch)
 }
 
+func (q *Queue[T]) IsClosed() bool {
+	if q == nil {
+		return true
+	}
+
+	q.lock.RLock()
+	defer q.lock.RUnlock()
+
+	return q.isClosed
+}
+
 func (q *Queue[T]) enqueue(data T) (err error) {
 	// RLock을 사용해도 채널에서 동기화 가능
 	q.lock.RLock()
