@@ -2,6 +2,7 @@ package timer
 
 import (
 	"errors"
+	"sync"
 	"sync/atomic"
 	"time"
 
@@ -12,29 +13,33 @@ import (
 
 var (
 	ErrNil          = errors.New("Timer fail(nil)")
-	ErrInvalidCapa  = errors.New("Timer fail(invalid capacity)")
+	ErrInvalidCap   = errors.New("Timer fail(invalid capacity)")
 	ErrExpiredQFull = errors.New("Timer fail(expired queue full)")
+	ErrClosed       = errors.New("Timer fail(closed)")
 )
 
-type TimerEngine[T any] struct {
-	tw  *timingwheel.TimingWheel
-	q   *queue.Queue[T]
-	len atomic.Uint32
-	cap int
+type Engine[T any] struct {
+	lock        sync.RWMutex
+	isClosed    bool
+	timingWheel *timingwheel.TimingWheel
+	q           *queue.Queue[T]
+
+	qFail  atomic.Int64 // queue 문제로 처리하지 못한 timeout
+	active atomic.Int64 // queue에 있는 timeout을 제외한 현재 사용 중인 timer
+	cap    int
 }
 
 type Timer struct {
-	twt      atomic.Pointer[timingwheel.Timer]
-	canceled atomic.Bool
+	timingWheelTimer *timingwheel.Timer
 }
 
-func New[T any](tw *timingwheel.TimingWheel, capacity int) (*TimerEngine[T], error) {
-	if tw == nil {
+func New[T any](timingWheel *timingwheel.TimingWheel, capacity int) (*Engine[T], error) {
+	if timingWheel == nil {
 		return nil, ErrNil
 	}
 
 	if capacity <= 0 {
-		return nil, ErrInvalidCapa
+		return nil, ErrInvalidCap
 	}
 
 	q, err := queue.New[T](capacity)
@@ -42,81 +47,142 @@ func New[T any](tw *timingwheel.TimingWheel, capacity int) (*TimerEngine[T], err
 		return nil, err
 	}
 
-	te := &TimerEngine[T]{
-		tw:  tw,
-		q:   q,
-		cap: capacity,
+	engine := &Engine[T]{
+		timingWheel: timingWheel,
+		q:           q,
+		cap:         capacity,
 	}
 
-	return te, nil
+	return engine, nil
 }
 
-func (te *TimerEngine[T]) C() <-chan T {
-	return te.q.C()
+func (engine *Engine[T]) Close() {
+	if engine == nil {
+		return
+	}
+
+	engine.lock.Lock()
+	defer engine.lock.Unlock()
+
+	if engine.isClosed {
+		return
+	}
+
+	engine.isClosed = true
+	engine.q.Close()
 }
 
-func (te *TimerEngine[T]) Set(d time.Duration, key T) (*Timer, error) {
-	if te == nil {
+func (engine *Engine[T]) Set(d time.Duration, key T) (*Timer, error) {
+	if engine == nil {
 		return nil, ErrNil
 	}
 
-	max := uint32(te.cap)
-	for {
-		curr := te.len.Load()
+	engine.lock.Lock()
+	defer engine.lock.Unlock()
 
-		if curr >= max {
-			return nil, ErrExpiredQFull
-		}
+	if engine.isClosed {
+		return nil, ErrClosed
+	}
 
-		if te.len.CompareAndSwap(curr, curr+1) {
-			break
-		}
+	if (int(engine.active.Load()) + engine.q.Len()) >= engine.cap {
+		return nil, ErrExpiredQFull
 	}
 
 	timer := &Timer{}
 
-	f := func() {
-		if timer.canceled.CompareAndSwap(false, true) {
-			te.len.Add(^uint32(0)) // Add(-1)
-			_ = te.q.Enqueue(key)
-			timer.twt.Store(nil)
+	timeoutFunc := func() {
+		{
+			engine.lock.Lock()
+			defer engine.lock.Unlock()
+
+			// Cancel 경합
+			if timer.timingWheelTimer == nil {
+				return
+			}
+
+			engine.active.Add(-1)
+
+			timer.timingWheelTimer = nil
 		}
+
+		if err := engine.q.Enqueue(key); err != nil {
+			engine.qFail.Add(1)
+		}
+
 	}
 
-	twt := te.tw.AfterFunc(d, f)
-	timer.twt.Store(twt)
+	timer.timingWheelTimer = engine.timingWheel.AfterFunc(d, timeoutFunc)
 
-	// 타이머를 생성하는 찰나에 이미 만료(timeout)된 경우를 대비
-	// f()가 Store(nil)을 먼저 수행하고, 여기서 다시 Store(twt)를 했을 경우를 방어함
-	if timer.canceled.Load() {
-		// 이미 만료되었으므로 Stop() 호출 없이 포인터만 정리
-		timer.twt.Store(nil)
-	}
+	engine.active.Add(1)
 
 	return timer, nil
 }
 
 // Cancel은 Set이 완료된 후 timeout과 경합 체크 필요
-func (te *TimerEngine[T]) Cancel(timer *Timer) {
-	if (te == nil) || (timer == nil) {
+func (engine *Engine[T]) Cancel(timer *Timer) {
+	if (engine == nil) || (timer == nil) {
 		return
 	}
 
-	// 이미 만료되었거나 취소된 경우 중복 처리 방지
-	if !timer.canceled.CompareAndSwap(false, true) {
+	engine.lock.Lock()
+	defer engine.lock.Unlock()
+
+	// Timeout 경합, 중복 Cancel 방지
+	if timer.timingWheelTimer == nil {
 		return
 	}
 
-	te.len.Add(^uint32(0))                      // uint32에서의 Add(-1) 효과
-	if twt := timer.twt.Swap(nil); twt != nil { // t를 nil로 변경하고, t의 이전 값이 있으면 Stop 처리
-		twt.Stop()
+	engine.active.Add(-1)
+
+	timer.timingWheelTimer.Stop()
+	timer.timingWheelTimer = nil
+}
+
+func (engine *Engine[T]) C() <-chan T {
+	if engine == nil {
+		return nil
 	}
+
+	return engine.q.C()
 }
 
-func (te *TimerEngine[T]) Len() int {
-	return int(te.len.Load())
+func (engine *Engine[T]) Len() int {
+	if engine == nil {
+		return 0
+	}
+
+	engine.lock.RLock()
+	defer engine.lock.RUnlock()
+
+	return int(engine.active.Load()) + engine.q.Len()
 }
 
-func (te *TimerEngine[T]) Cap() int {
-	return te.cap
+func (engine *Engine[T]) Cap() int {
+	if engine == nil {
+		return 0
+	}
+
+	return engine.cap
+}
+
+func (engine *Engine[T]) QFail() int {
+	if engine == nil {
+		return 0
+	}
+
+	engine.lock.RLock()
+	defer engine.lock.RUnlock()
+
+	return int(engine.qFail.Load())
+}
+
+func (engine *Engine[T]) IsClosed() bool {
+	if engine == nil {
+		return true
+	}
+
+	engine.lock.RLock()
+	defer engine.lock.RUnlock()
+
+	return engine.isClosed
 }
