@@ -85,12 +85,16 @@ func TestQueue_ConcurrencyAndMemoryCleanup(t *testing.T) {
 
 			for j := 0; j < loopCount; j++ {
 				// Dequeue 시험
-				_, err := q.Dequeue()
-				if err != nil {
+				select {
+				case _, ok := <-q.C():
+					if !ok {
+						dequeueFailCount.Add(1)
+					} else {
+						dequeueSuccCount.Add(1)
+					}
+				default:
 					dequeueFailCount.Add(1)
-					continue
 				}
-				dequeueSuccCount.Add(1)
 			}
 		}(i)
 
@@ -181,9 +185,9 @@ func TestQueue_IntegrityCheck100(t *testing.T) {
 			t.Errorf("[%d] Enqueue 실패: %v", i, err)
 		}
 
-		actual, err := q.Dequeue()
-		if err != nil {
-			t.Errorf("[%d] Dequeue 실패: %v", i, err)
+		actual, ok := <-q.C()
+		if !ok {
+			t.Errorf("[%d] Dequeue 실패: channel closed", i)
 		}
 
 		if expected != actual {
@@ -238,7 +242,7 @@ func TestQueue_ExecutionTimeMeasurement(t *testing.T) {
 			defer wg.Done()
 			<-startSignal
 			for j := 0; j < loopCount; j++ {
-				_, _ = q.Dequeue()
+				_, _ = <-q.C()
 			}
 		}()
 	}
@@ -303,13 +307,19 @@ func TestQueue_ConcurrentClose(t *testing.T) {
 			defer wg.Done()
 			<-startSignal
 			for j := 0; j < loopCount; j++ {
-				_, err := q.Dequeue()
-				if err == nil {
-					dequeueSuccCount.Add(1)
-				} else if err == ErrClosed {
-					dequeueClosedCount.Add(1)
-				} else if err == ErrEmpty {
-					dequeueEmptyCount.Add(1)
+				select {
+				case _, ok := <-q.C():
+					if ok {
+						dequeueSuccCount.Add(1)
+					} else {
+						dequeueClosedCount.Add(1)
+					}
+				default:
+					if q.IsClosed() {
+						dequeueClosedCount.Add(1)
+					} else {
+						dequeueEmptyCount.Add(1)
+					}
 				}
 			}
 		}()

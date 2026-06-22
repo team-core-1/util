@@ -10,7 +10,7 @@ type Context[T any] struct {
 
 func (c *Context[T]) Next() {
 	c.index++
-	for c.index < int(len(c.handlers)) {
+	for c.index < len(c.handlers) {
 		if c.handlers[c.index] != nil {
 			c.handlers[c.index](c)
 		}

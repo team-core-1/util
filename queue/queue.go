@@ -23,6 +23,7 @@ type ActionType int
 const (
 	ActionEnqueue ActionType = iota + 1
 	ActionDequeue
+	ActionPipe
 )
 
 type HandlerFunc[T any] func(*Context[T])
@@ -30,12 +31,14 @@ type HandlerFunc[T any] func(*Context[T])
 type Queue[T any] struct {
 	lock     sync.RWMutex
 	isClosed bool
-	ch       chan T
+	inCh     chan T
+	outCh    chan T
 	pool     sync.Pool
 
 	handlers        []HandlerFunc[T]
 	enqueueHandlers []HandlerFunc[T]
 	dequeueHandlers []HandlerFunc[T]
+	pipeHandlers    []HandlerFunc[T]
 }
 
 func New[T any](capacity int) (*Queue[T], error) {
@@ -44,7 +47,8 @@ func New[T any](capacity int) (*Queue[T], error) {
 	}
 
 	q := &Queue[T]{
-		ch: make(chan T, capacity),
+		inCh:  make(chan T, capacity),
+		outCh: make(chan T),
 	}
 
 	q.pool.New = func() any {
@@ -52,6 +56,8 @@ func New[T any](capacity int) (*Queue[T], error) {
 	}
 
 	q.rebuildHandlers()
+
+	go q.pipe()
 
 	return q, nil
 }
@@ -70,8 +76,8 @@ func (q *Queue[T]) Close() {
 	}
 
 	q.isClosed = true
-	close(q.ch)
-	// q.ch = nil 은 하지 않고, q가 참조 해제되면 GC에서 처리
+	close(q.inCh)
+	// q.inCh = nil 은 하지 않고, q가 참조 해제되면 GC에서 처리
 }
 
 func (q *Queue[T]) Enqueue(data T) error {
@@ -80,8 +86,6 @@ func (q *Queue[T]) Enqueue(data T) error {
 	}
 
 	c := q.pool.Get().(*Context[T])
-	c.reset()
-
 	q.lock.RLock()
 	c.handlers = q.enqueueHandlers
 	q.lock.RUnlock()
@@ -106,8 +110,6 @@ func (q *Queue[T]) Dequeue() (T, error) {
 	}
 
 	c := q.pool.Get().(*Context[T])
-	c.reset()
-
 	q.lock.RLock()
 	c.handlers = q.dequeueHandlers
 	q.lock.RUnlock()
@@ -128,7 +130,62 @@ func (q *Queue[T]) C() <-chan T {
 		return nil
 	}
 
-	return q.ch
+	return q.outCh
+}
+
+func (q *Queue[T]) Use(handlerFunc ...HandlerFunc[T]) {
+	if q == nil {
+		return
+	}
+
+	q.rebuildHandlers(handlerFunc...)
+}
+
+func (q *Queue[T]) Len() int {
+	if q == nil {
+		return 0
+	}
+
+	q.lock.RLock()
+	defer q.lock.RUnlock()
+
+	// close된 채널에서 처리 가능함
+	return len(q.inCh)
+}
+
+func (q *Queue[T]) Cap() int {
+	if q == nil {
+		return 0
+	}
+
+	q.lock.RLock()
+	defer q.lock.RUnlock()
+
+	// close된 채널에서 처리 가능함
+	return cap(q.inCh)
+}
+
+func (q *Queue[T]) IsFull() bool {
+	if q == nil {
+		return false
+	}
+
+	q.lock.RLock()
+	defer q.lock.RUnlock()
+
+	// close된 채널에서 처리 가능함
+	return len(q.inCh) == cap(q.inCh)
+}
+
+func (q *Queue[T]) IsClosed() bool {
+	if q == nil {
+		return true
+	}
+
+	q.lock.RLock()
+	defer q.lock.RUnlock()
+
+	return q.isClosed
 }
 
 func (q *Queue[T]) rebuildHandlers(handlerFunc ...HandlerFunc[T]) {
@@ -149,61 +206,34 @@ func (q *Queue[T]) rebuildHandlers(handlerFunc ...HandlerFunc[T]) {
 	q.dequeueHandlers[len(q.handlers)] = func(c *Context[T]) {
 		c.data, c.err = q.dequeue()
 	}
+
+	q.pipeHandlers = make([]HandlerFunc[T], len(q.handlers)+1)
+	copy(q.pipeHandlers, q.handlers)
+	q.pipeHandlers[len(q.handlers)] = func(c *Context[T]) {
+		q.write(c.data)
+	}
 }
 
-func (q *Queue[T]) Use(handlerFunc ...HandlerFunc[T]) {
+func (q *Queue[T]) pipe() {
 	if q == nil {
 		return
 	}
 
-	q.rebuildHandlers(handlerFunc...)
-}
+	for data := range q.inCh {
+		c := q.pool.Get().(*Context[T])
+		q.lock.RLock()
+		c.handlers = q.pipeHandlers
+		q.lock.RUnlock()
+		c.Action = ActionPipe
+		c.data = data
 
-func (q *Queue[T]) Len() int {
-	if q == nil {
-		return 0
+		c.index = -1
+		c.Next()
+
+		c.reset()
+		q.pool.Put(c)
 	}
-
-	q.lock.RLock()
-	defer q.lock.RUnlock()
-
-	// close된 채널에서 처리 가능함
-	return len(q.ch)
-}
-
-func (q *Queue[T]) Cap() int {
-	if q == nil {
-		return 0
-	}
-
-	q.lock.RLock()
-	defer q.lock.RUnlock()
-
-	// close된 채널에서 처리 가능함
-	return cap(q.ch)
-}
-
-func (q *Queue[T]) IsFull() bool {
-	if q == nil {
-		return false
-	}
-
-	q.lock.RLock()
-	defer q.lock.RUnlock()
-
-	// close된 채널에서 처리 가능함
-	return len(q.ch) == cap(q.ch)
-}
-
-func (q *Queue[T]) IsClosed() bool {
-	if q == nil {
-		return true
-	}
-
-	q.lock.RLock()
-	defer q.lock.RUnlock()
-
-	return q.isClosed
+	close(q.outCh)
 }
 
 func (q *Queue[T]) enqueue(data T) (err error) {
@@ -216,7 +246,7 @@ func (q *Queue[T]) enqueue(data T) (err error) {
 	}
 
 	select {
-	case q.ch <- data:
+	case q.inCh <- data:
 		return nil
 	default:
 		return ErrFull
@@ -231,7 +261,7 @@ func (q *Queue[T]) dequeue() (T, error) {
 	defer q.lock.RUnlock()
 
 	select {
-	case data, ok := <-q.ch:
+	case data, ok := <-q.inCh:
 		// close된 채널에서 처리 가능함
 		if !ok {
 			return zero, ErrClosed
@@ -243,4 +273,8 @@ func (q *Queue[T]) dequeue() (T, error) {
 		}
 		return zero, ErrEmpty
 	}
+}
+
+func (q *Queue[T]) write(data T) {
+	q.outCh <- data
 }
