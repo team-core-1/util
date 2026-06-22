@@ -1,4 +1,4 @@
-package queue
+package pipequeue
 
 type Context[T any] struct {
 	index    int
