@@ -321,3 +321,83 @@ func TestTimer_MemoryLeakCheck(t *testing.T) {
 	t.Logf("==================================================")
 	record(t, fmt.Sprintf("Before:%.2fMB, After:%.2fMB", float64(msBefore.Alloc)/1024/1024, float64(msAfter.Alloc)/1024/1024))
 }
+
+func TestTimer_Middleware(t *testing.T) {
+	tw := timingwheel.NewTimingWheel(10*time.Millisecond, 20)
+	tw.Start()
+	defer tw.Stop()
+
+	engine, _ := New[int](tw, 10)
+
+	var setCalls, cancelCalls, timeoutCalls atomic.Int64
+
+	t.Logf("==================================================")
+	t.Logf(" [시험 목적 및 조건]")
+	t.Logf("  - 시험 목적 : Set, Cancel, Timeout 라이프사이클 미들웨어 동작 검증")
+	t.Logf("  - 시험 조건 : Capacity: 10, Action별 미들웨어 카운트 체크")
+	t.Logf("--------------------------------------------------")
+
+	engine.Use(func(c *Context[int]) {
+		switch c.Action() {
+		case ActionSet:
+			setCalls.Add(1)
+		case ActionCancel:
+			cancelCalls.Add(1)
+		case ActionTimeout:
+			timeoutCalls.Add(1)
+		}
+		c.Next()
+	})
+
+	// 1. Set 실행
+	_, err := engine.Set(50*time.Millisecond, 42)
+	if err != nil {
+		t.Fatalf("Set failed: %v", err)
+	}
+
+	if setCalls.Load() != 1 {
+		t.Errorf("expected setCalls to be 1, got %d", setCalls.Load())
+	}
+
+	// 2. Timeout 대기
+	time.Sleep(100 * time.Millisecond)
+
+	if timeoutCalls.Load() != 1 {
+		t.Errorf("expected timeoutCalls to be 1, got %d", timeoutCalls.Load())
+	}
+
+	// 3. Cancel 실행
+	tm2, err := engine.Set(100*time.Millisecond, 43)
+	if err != nil {
+		t.Fatalf("Set failed: %v", err)
+	}
+
+	engine.Cancel(tm2)
+
+	if cancelCalls.Load() != 1 {
+		t.Errorf("expected cancelCalls to be 1, got %d", cancelCalls.Load())
+	}
+
+	// 취소되었으므로 Timeout은 증가하지 않아야 함
+	time.Sleep(150 * time.Millisecond)
+	if timeoutCalls.Load() != 1 {
+		t.Errorf("expected timeoutCalls to remain 1, got %d", timeoutCalls.Load())
+	}
+
+	engine.Close()
+
+	t.Logf(" [테스트 수치]")
+	t.Logf("  - Set 미들웨어 호출 : %d 회", setCalls.Load())
+	t.Logf("  - Cancel 미들웨어 호출 : %d 회", cancelCalls.Load())
+	t.Logf("  - Timeout 미들웨어 호출 : %d 회", timeoutCalls.Load())
+	t.Logf("--------------------------------------------------")
+	t.Logf(" [시험 결과]")
+	if t.Failed() {
+		t.Logf("  - 미들웨어 동작 실패")
+	} else {
+		t.Logf("  - 모든 미들웨어(Set/Cancel/Timeout) 검증 완료")
+	}
+	t.Logf("==================================================")
+
+	record(t, fmt.Sprintf("Set:%d, Cancel:%d, Timeout:%d", setCalls.Load(), cancelCalls.Load(), timeoutCalls.Load()))
+}
