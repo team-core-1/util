@@ -1,21 +1,41 @@
 package indexpool
 
 import (
-	"errors"
-	"fmt"
-	"math/rand/v2"
-	"sync/atomic"
+	"sync"
 )
 
-var (
-	ErrInvalidCap = errors.New("IndexPool fail(invalid capacity)")
-	ErrNil        = errors.New("IndexPool fail(nil)")
-	ErrEmpty      = errors.New("IndexPool fail(empty)")
+type ErrorType string
+
+func (e ErrorType) Error() string {
+	return string(e)
+}
+
+const (
+	ErrInvalidCap    = ErrorType("IndexPool fail(invalid capacity)")
+	ErrNil           = ErrorType("IndexPool fail(nil)")
+	ErrEmpty         = ErrorType("IndexPool fail(empty)")
+	ErrWrongIndex    = ErrorType("IndexPool fail(wrong index)")
+	ErrInuseIndex    = ErrorType("IndexPool fail(inuse index)")
+	ErrNotInuseIndex = ErrorType("IndexPool fail(not inuse index)")
+	ErrDupIndex      = ErrorType("IndexPool fail(duplicated index)")
 )
+
+type ActionType int
+
+const (
+	ActionGet ActionType = iota + 1
+	ActionPut
+)
+
+type slot[T any] struct {
+	inUse bool
+	mem   T
+}
 
 type IndexPool[T any] struct {
-	q   chan int
-	seq []atomic.Uint32
+	mu    sync.RWMutex
+	q     chan int
+	slots [](slot[T])
 }
 
 func New[T any](capacity int) (*IndexPool[T], error) {
@@ -24,59 +44,90 @@ func New[T any](capacity int) (*IndexPool[T], error) {
 	}
 
 	q := make(chan int, capacity)
-	seq := make([]atomic.Uint32, capacity)
+	slots := make([]slot[T], capacity)
 
 	for i := 0; i < capacity; i++ {
-		seq[i].Store(rand.Uint32())
 		q <- i
 	}
 
 	return &IndexPool[T]{
-		q:   q,
-		seq: seq,
+		q:     q,
+		slots: slots,
 	}, nil
 }
 
-func (ip *IndexPool[T]) Get() (int, uint32, error) {
+func (ip *IndexPool[T]) GetIndex() (int, error) {
 	if ip == nil {
-		return -1, 0, ErrNil
+		return -1, ErrNil
 	}
 
 	select {
-	case index := <-ip.q:
-		return index, ip.seq[index].Add(1), nil
+	case idx := <-ip.q:
+		ip.mu.Lock()
+		ip.slots[idx].inUse = true
+		ip.mu.Unlock()
+		return idx, nil
 	default:
-		return -1, 0, ErrEmpty
+		return -1, ErrEmpty
 	}
 }
 
-func (ip *IndexPool[T]) Put(index int, key uint32) (err error) {
+func (ip *IndexPool[T]) GetMem(index int) (*T, error) {
 	if ip == nil {
-		return fmt.Errorf("IndexPool Put(%d) fail(nil)", index)
+		return nil, ErrNil
 	}
 
-	if (index < 0) || (index >= cap(ip.seq)) {
-		return fmt.Errorf("IndexPool Put(%d) fail(wrong index)", index)
+	if (index < 0) || (index >= len(ip.slots)) {
+		return nil, ErrWrongIndex
 	}
 
-	if !ip.seq[index].CompareAndSwap(key, key+1) {
-		return fmt.Errorf("IndexPool Put(%d) fail(duplicated index)", index)
+	ip.mu.RLock()
+	defer ip.mu.RUnlock()
+
+	if !ip.slots[index].inUse {
+		return nil, ErrNotInuseIndex
 	}
 
-	select {
-	case ip.q <- index:
-		return nil
-	default:
-		// CAS를 통과한 유효한 index인데, full이 발생하는 경우는 발생해서는 안됨
-		ip.seq[index].Store(key)
-		return fmt.Errorf("IndexPool Put(%d) fail(full)", index)
+	return &ip.slots[index].mem, nil
+}
+
+func (ip *IndexPool[T]) Put(index int) error {
+	if ip == nil {
+		return ErrNil
 	}
+
+	if (index < 0) || (index >= len(ip.slots)) {
+		return ErrWrongIndex
+	}
+
+	ip.mu.Lock()
+	defer ip.mu.Unlock()
+
+	if !ip.slots[index].inUse {
+		return ErrDupIndex
+	}
+	ip.slots[index].inUse = false
+
+	var zero T
+	ip.slots[index].mem = zero
+
+	ip.q <- index
+
+	return nil
 }
 
 func (ip *IndexPool[T]) Len() int {
+	if ip == nil {
+		return 0
+	}
+
 	return len(ip.q)
 }
 
 func (ip *IndexPool[T]) Cap() int {
+	if ip == nil {
+		return 0
+	}
+
 	return cap(ip.q)
 }
