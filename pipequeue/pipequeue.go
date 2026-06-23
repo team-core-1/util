@@ -64,6 +64,8 @@ func New[T any](capacity int) (*PipeQueue[T], error) {
 	return q, nil
 }
 
+// Close를 호출하면 PipeQueue 자원이 모두 해제되기 때문에
+// select case에서 사용하던 PipeQueue는 nil로 변경해야 함.
 func (q *PipeQueue[T]) Close() {
 	if q == nil {
 		return
@@ -92,7 +94,7 @@ func (q *PipeQueue[T]) Enqueue(data T) error {
 	q.mu.RLock()
 	c.handlers = q.enqueueHandlers
 	q.mu.RUnlock()
-	c.index, c.Action, c.data = -1, ActionEnqueue, data
+	c.index, c.action, c.data = -1, ActionEnqueue, data
 
 	c.Next()
 	err := c.err
@@ -114,7 +116,7 @@ func (q *PipeQueue[T]) Dequeue() (T, error) {
 	q.mu.RLock()
 	c.handlers = q.dequeueHandlers
 	q.mu.RUnlock()
-	c.index, c.Action = -1, ActionDequeue
+	c.index, c.action = -1, ActionDequeue
 
 	c.Next()
 	data, err := c.data, c.err
@@ -234,7 +236,7 @@ func (q *PipeQueue[T]) pipe() {
 			q.mu.RLock()
 			c.handlers = q.pipeHandlers
 			q.mu.RUnlock()
-			c.index, c.Action, c.data = -1, ActionPipe, data
+			c.index, c.action, c.data = -1, ActionPipe, data
 
 			c.Next()
 
@@ -288,8 +290,13 @@ func (q *PipeQueue[T]) dequeue() (T, error) {
 
 func (q *PipeQueue[T]) write(data T) {
 	select {
+	case <-q.closeSig:
+		return
+	default:
+	}
+
+	select {
 	case q.outCh <- data:
 	case <-q.closeSig:
 	}
-
 }

@@ -2,7 +2,7 @@ package pipequeue
 
 type Context[T any] struct {
 	index    int
-	Action   ActionType
+	action   ActionType
 	handlers []HandlerFunc[T]
 	data     T
 	err      error
@@ -17,6 +17,10 @@ func (c *Context[T]) Next() {
 		c.index++
 	}
 }
+
+func (c *Context[T]) Action() ActionType { return c.action }
+func (c *Context[T]) Data() T            { return c.data }
+func (c *Context[T]) Err() error         { return c.err }
 
 func (c *Context[T]) reset() {
 	*c = Context[T]{}
