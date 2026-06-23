@@ -15,27 +15,27 @@ const (
 	ErrNil           = ErrorType("IndexPool fail(nil)")
 	ErrEmpty         = ErrorType("IndexPool fail(empty)")
 	ErrWrongIndex    = ErrorType("IndexPool fail(wrong index)")
+	ErrNotAllocIndex = ErrorType("IndexPool fail(not alloc index)")
 	ErrInuseIndex    = ErrorType("IndexPool fail(inuse index)")
-	ErrNotInuseIndex = ErrorType("IndexPool fail(not inuse index)")
-	ErrDupIndex      = ErrorType("IndexPool fail(duplicated index)")
 )
 
-type ActionType int
+type State int
 
 const (
-	ActionGet ActionType = iota + 1
-	ActionPut
+	StateNone  State = 0
+	StateAlloc State = 1 << iota
+	StateInUse
 )
 
 type slot[T any] struct {
-	inUse bool
+	state State
 	mem   T
 }
 
 type IndexPool[T any] struct {
-	mu    sync.RWMutex
+	mu    sync.Mutex
 	q     chan int
-	slots [](slot[T])
+	slots []slot[T]
 }
 
 func New[T any](capacity int) (*IndexPool[T], error) {
@@ -56,7 +56,7 @@ func New[T any](capacity int) (*IndexPool[T], error) {
 	}, nil
 }
 
-func (ip *IndexPool[T]) GetIndex() (int, error) {
+func (ip *IndexPool[T]) Get() (int, error) {
 	if ip == nil {
 		return -1, ErrNil
 	}
@@ -64,31 +64,12 @@ func (ip *IndexPool[T]) GetIndex() (int, error) {
 	select {
 	case idx := <-ip.q:
 		ip.mu.Lock()
-		ip.slots[idx].inUse = true
+		ip.slots[idx].state = StateAlloc
 		ip.mu.Unlock()
 		return idx, nil
 	default:
 		return -1, ErrEmpty
 	}
-}
-
-func (ip *IndexPool[T]) GetMem(index int) (*T, error) {
-	if ip == nil {
-		return nil, ErrNil
-	}
-
-	if (index < 0) || (index >= len(ip.slots)) {
-		return nil, ErrWrongIndex
-	}
-
-	ip.mu.RLock()
-	defer ip.mu.RUnlock()
-
-	if !ip.slots[index].inUse {
-		return nil, ErrNotInuseIndex
-	}
-
-	return &ip.slots[index].mem, nil
 }
 
 func (ip *IndexPool[T]) Put(index int) error {
@@ -103,15 +84,55 @@ func (ip *IndexPool[T]) Put(index int) error {
 	ip.mu.Lock()
 	defer ip.mu.Unlock()
 
-	if !ip.slots[index].inUse {
-		return ErrDupIndex
+	if (ip.slots[index].state & StateAlloc) != StateAlloc {
+		return ErrNotAllocIndex
 	}
-	ip.slots[index].inUse = false
+	if (ip.slots[index].state & StateInUse) == StateInUse {
+		return ErrInuseIndex
+	}
+	ip.slots[index].state = StateNone
 
 	var zero T
 	ip.slots[index].mem = zero
 
 	ip.q <- index
+
+	return nil
+}
+
+func (ip *IndexPool[T]) Access(index int, f func(*T)) error {
+	if ip == nil {
+		return ErrNil
+	}
+
+	if (index < 0) || (index >= len(ip.slots)) {
+		return ErrWrongIndex
+	}
+
+	if err := func() error {
+		ip.mu.Lock()
+		defer ip.mu.Unlock()
+
+		if (ip.slots[index].state & StateAlloc) != StateAlloc {
+			return ErrNotAllocIndex
+		}
+		if (ip.slots[index].state & StateInUse) == StateInUse {
+			return ErrInuseIndex
+		}
+		ip.slots[index].state |= StateInUse
+
+		return nil
+	}(); err != nil {
+		return err
+	}
+
+	defer func() {
+		ip.mu.Lock()
+		ip.slots[index].state &^= StateInUse
+		ip.mu.Unlock()
+	}()
+
+	f(&ip.slots[index].mem)
 
 	return nil
 }
