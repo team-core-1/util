@@ -43,6 +43,78 @@ func TestMain(m *testing.M) {
 	os.Exit(exitCode)
 }
 
+// 1. 미들웨어 등록 및 정상 호출 확인
+func TestTimer_Middleware(t *testing.T) {
+	const capacity = 10
+
+	tw := timingwheel.NewTimingWheel(10*time.Millisecond, 20)
+	tw.Start()
+	defer tw.Stop()
+
+	engine, _ := New[int](tw, capacity)
+
+	var setCalls, cancelCalls, timeoutCalls atomic.Uint64
+
+	engine.Use(func(c *Context[int]) {
+		switch c.Action() {
+		case ActionSet:
+			setCalls.Add(1)
+		case ActionCancel:
+			cancelCalls.Add(1)
+		case ActionTimeout:
+			timeoutCalls.Add(1)
+		}
+		c.Next()
+	})
+
+	t.Logf("==================================================")
+	t.Logf(" [시험 목적 및 조건]")
+	t.Logf("  - 시험 목적 : Set/Cancel/Timeout 시 미들웨어 호출 여부 확인")
+	t.Logf("  - 시험 조건 : Capacity:%d", capacity)
+	t.Logf("--------------------------------------------------")
+
+	tm, err := engine.Set(20*time.Millisecond, 100)
+	if err != nil {
+		t.Fatalf("Set 실패: %v", err)
+	}
+
+	time.Sleep(5 * time.Millisecond)
+
+	err = engine.Cancel(tm)
+	if err != nil {
+		t.Fatalf("Cancel 실패: %v", err)
+	}
+
+	_, err = engine.Set(10*time.Millisecond, 200)
+	if err != nil {
+		t.Fatalf("Set 실패: %v", err)
+	}
+
+	// Timeout 수신 대기
+	select {
+	case <-engine.C():
+	case <-time.After(100 * time.Millisecond):
+		t.Error("Timeout 수신 대기 시간 초과")
+	}
+
+	engine.Close()
+
+	t.Logf(" [테스트 수치]")
+	t.Logf("  - Set 미들웨어 호출 : %d 회", setCalls.Load())
+	t.Logf("  - Cancel 미들웨어 호출 : %d 회", cancelCalls.Load())
+	t.Logf("  - Timeout 미들웨어 호출 : %d 회", timeoutCalls.Load())
+	t.Logf("--------------------------------------------------")
+	t.Logf(" [시험 결과]")
+	if t.Failed() {
+		t.Logf("  - 미들웨어 동작 실패")
+	} else {
+		t.Logf("  - 모든 미들웨어(Set/Cancel/Timeout) 검증 완료")
+	}
+	t.Logf("==================================================")
+
+	record(t, fmt.Sprintf("Set:%d, Cancel:%d, Timeout:%d", setCalls.Load(), cancelCalls.Load(), timeoutCalls.Load()))
+}
+
 // 2. cap이 100인 timer engine 생성 -> 하나의 고루틴에서 C()로 timeout 처리하고, 멀티 고루틴에서 Set()한 후 일부는 Cancel 나머지는 timeout 처리
 func TestTimer_Integrity(t *testing.T) {
 	const capacity = 100
@@ -320,23 +392,4 @@ func TestTimer_MemoryLeakCheck(t *testing.T) {
 	}
 	t.Logf("==================================================")
 	record(t, fmt.Sprintf("Before:%.2fMB, After:%.2fMB", float64(msBefore.Alloc)/1024/1024, float64(msAfter.Alloc)/1024/1024))
-}
-	}
-
-	engine.Close()
-
-	t.Logf(" [테스트 수치]")
-	t.Logf("  - Set 미들웨어 호출 : %d 회", setCalls.Load())
-	t.Logf("  - Cancel 미들웨어 호출 : %d 회", cancelCalls.Load())
-	t.Logf("  - Timeout 미들웨어 호출 : %d 회", timeoutCalls.Load())
-	t.Logf("--------------------------------------------------")
-	t.Logf(" [시험 결과]")
-	if t.Failed() {
-		t.Logf("  - 미들웨어 동작 실패")
-	} else {
-		t.Logf("  - 모든 미들웨어(Set/Cancel/Timeout) 검증 완료")
-	}
-	t.Logf("==================================================")
-
-	record(t, fmt.Sprintf("Set:%d, Cancel:%d, Timeout:%d", setCalls.Load(), cancelCalls.Load(), timeoutCalls.Load()))
 }

@@ -108,6 +108,10 @@ func (engine *Engine[T]) Set(d time.Duration, key T) (*Timer, error) {
 	}
 
 	c := engine.pool.Get().(*Context[T])
+	defer func() {
+		c.reset()
+		engine.pool.Put(c)
+	}()
 
 	engine.mu.RLock() // RLock()으로 가능한지 확인
 	c.handlers = engine.setHandlers
@@ -116,9 +120,6 @@ func (engine *Engine[T]) Set(d time.Duration, key T) (*Timer, error) {
 	c.index, c.action, c.dur, c.key = -1, ActionSet, d, key
 	c.Next()
 	timer, err := c.timer, c.err
-
-	c.reset()
-	engine.pool.Put(c)
 
 	return timer, err
 }
@@ -129,6 +130,10 @@ func (engine *Engine[T]) Cancel(timer *Timer) error {
 	}
 
 	c := engine.pool.Get().(*Context[T])
+	defer func() {
+		c.reset()
+		engine.pool.Put(c)
+	}()
 
 	engine.mu.RLock()
 	c.handlers = engine.cancelHandlers
@@ -137,9 +142,6 @@ func (engine *Engine[T]) Cancel(timer *Timer) error {
 	c.index, c.action, c.timer = -1, ActionCancel, timer
 	c.Next()
 	err := c.err
-
-	c.reset()
-	engine.pool.Put(c)
 
 	return err
 }
@@ -268,18 +270,20 @@ func (engine *Engine[T]) setTimer(d time.Duration, key T) (*Timer, error) {
 			return
 		}
 
+		defer engine.active.Add(-1)
+
 		c := engine.pool.Get().(*Context[T])
+		defer func() {
+			c.reset()
+			engine.pool.Put(c)
+		}()
+
 		engine.mu.RLock()
 		c.handlers = engine.timeoutHandlers
 		engine.mu.RUnlock()
 
 		c.index, c.action, c.key = -1, ActionTimeout, key
 		c.Next()
-
-		c.reset()
-		engine.pool.Put(c)
-
-		engine.active.Add(-1)
 	}
 
 	timer.timingWheelTimer = engine.timingWheel.AfterFunc(d, timeoutFunc)
