@@ -263,3 +263,77 @@ func TestIndexPool_AccessConcurrency(t *testing.T) {
 
 	record(t, fmt.Sprintf("Access concurrency verified (Succ: 1, InUseBlocked: %d)", accessFailInuseCount.Load()))
 }
+
+func TestIndexPool_AccessPanicRecovery(t *testing.T) {
+	const capacity = 1
+	ip, _ := New[int](capacity)
+
+	t.Logf("==================================================")
+	t.Logf(" [시험 목적 및 조건]")
+	t.Logf("  - 시험 목적 : Access 콜백 내에서 패닉 발생 시 Unlock 및 상태 복구(정상 재진입) 검증")
+	t.Logf("  - 시험 조건 : 풀 용량: %d, 대상 인덱스: 1개, 강제 패닉 여부: 참(True)", capacity)
+	t.Logf("--------------------------------------------------")
+
+	idx, err := ip.Get()
+	if err != nil {
+		t.Fatalf("Get failed: %v", err)
+	}
+
+	// 1. 패닉 발생 시뮬레이션 및 복구
+	panicHandled := false
+	func() {
+		defer func() {
+			if r := recover(); r != nil {
+				panicHandled = true
+				t.Logf("  - 감지된 콜백 패닉 정상 복구 완료: %v", r)
+			}
+		}()
+
+		// Access 시도 중 패닉 트리거
+		_ = ip.Access(idx, func(memPtr *int) {
+			panic("simulated panic in Access callback")
+		})
+	}()
+
+	// 2. recover 이후 재진입 테스트
+	// 락이 올바르게 Unlock되었고 StateInUse가 해제되었다면 다시 진입할 때 에러가 없어야 하고 데드락에 빠지지 않아야 함
+	reenterSucc := false
+	var reenterErr error
+
+	errChan := make(chan error, 1)
+	go func() {
+		errChan <- ip.Access(idx, func(memPtr *int) {
+			*memPtr = 42
+		})
+	}()
+
+	// 데드락 감지를 위해 타임아웃 처리
+	select {
+	case reenterErr = <-errChan:
+		if reenterErr == nil {
+			reenterSucc = true
+		}
+	case <-time.After(1 * time.Second):
+		t.Errorf("  - 오작동 감지 : recover 이후 Access 재진입 시 데드락이 발생함 (타임아웃)")
+	}
+
+	t.Logf("==================================================")
+	t.Logf(" [테스트 수치]")
+	t.Logf("--------------------------------------------------")
+	t.Logf("  - 패닉 복구 여부           : %v (예상치: true)", panicHandled)
+	t.Logf("  - 재진입 성공 여부         : %v (예상치: true)", reenterSucc)
+	t.Logf("  - 재진입 시 발생 에러      : %v (예상치: <nil>)", reenterErr)
+	t.Logf("==================================================")
+
+	if !panicHandled {
+		t.Errorf("  - 오작동 감지 : 패닉이 복구되지 않음")
+	}
+	if !reenterSucc {
+		t.Errorf("  - 오작동 감지 : 재진입에 실패함 (에러: %v)", reenterErr)
+	} else {
+		t.Logf("  - 시험 결과 : 정상 (패닉 복구 후 정상 해제 및 데드락 없이 재진입 성공)")
+	}
+	t.Logf("==================================================")
+
+	record(t, fmt.Sprintf("Access panic recovery verified (PanicHandled: %v, ReenterSucc: %v)", panicHandled, reenterSucc))
+}
