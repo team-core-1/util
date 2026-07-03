@@ -1,26 +1,47 @@
 package hashmap
 
 import (
-	"errors"
-	"fmt"
-	"maps"
 	"sync"
 )
 
-var (
-	ErrInvalidCap  = errors.New("HashMap fail(invalid capacity)")
-	ErrNil         = errors.New("HashMap fail(nil)")
-	ErrFull        = errors.New("HashMap fail(full)")
-	ErrDup         = errors.New("HashMap fail(key duplicated)")
-	ErrKeyNotFound = errors.New("HashMap fail(key not found)")
-	ErrCbNil       = errors.New("HashMap fail(callback nil)")
-	ErrClosed      = errors.New("HashMap fail(closed)")
+type ErrorType string
+
+func (e ErrorType) Error() string {
+	return string(e)
+}
+
+const (
+	ErrInvalidCap  = ErrorType("hashmap: invalid capacity")
+	ErrNil         = ErrorType("hashmap: map is nil")
+	ErrFull        = ErrorType("hashmap: map is full")
+	ErrDupKey      = ErrorType("hashmap: duplicated key")
+	ErrKeyNotFound = ErrorType("hashmap: key not found")
+	ErrCbNil       = ErrorType("hashmap: callback nil")
+	ErrClosed      = ErrorType("hashmap: map is closed")
 )
+
+type ActionType int
+
+const (
+	ActionPut ActionType = iota + 1
+	ActionGet
+	ActionDelete
+	ActionAll
+	ActionDo
+)
+
+type HandlerFunc[K comparable, V any] func(*Context[K, V])
 
 type HashMap[K comparable, V any] struct {
 	sync.RWMutex
 	m   map[K]V
 	cap int
+
+	pool           sync.Pool
+	handlers       []HandlerFunc[K, V]
+	putHandlers    []HandlerFunc[K, V]
+	getHandlers    []HandlerFunc[K, V]
+	deleteHandlers []HandlerFunc[K, V]
 }
 
 func New[K comparable, V any](capacity int) (*HashMap[K, V], error) {
@@ -28,12 +49,19 @@ func New[K comparable, V any](capacity int) (*HashMap[K, V], error) {
 		return nil, ErrInvalidCap
 	}
 
-	m := make(map[K]V, capacity)
-
-	return &HashMap[K, V]{
-		m:   m,
+	hm := &HashMap[K, V]{
 		cap: capacity,
-	}, nil
+	}
+
+	hm.m = make(map[K]V, capacity)
+
+	hm.pool.New = func() any {
+		return &Context[K, V]{}
+	}
+
+	hm.rebuildHandlers()
+
+	return hm, nil
 }
 
 func (hm *HashMap[K, V]) Close() {
@@ -59,17 +87,17 @@ func (hm *HashMap[K, V]) Put(key K, value V) error {
 		return ErrClosed
 	}
 
-	if len(hm.m) >= hm.cap {
-		return ErrFull
-	}
+	c := hm.pool.Get().(*Context[K, V])
+	c.handlers = hm.putHandlers
+	c.index, c.action, c.key, c.value = -1, ActionPut, key, value
 
-	if _, ok := hm.m[key]; ok {
-		return ErrDup
-	}
+	c.Next()
+	err := c.err
 
-	hm.m[key] = value
+	c.reset()
+	hm.pool.Put(c)
 
-	return nil
+	return err
 }
 
 func (hm *HashMap[K, V]) Get(key K) (V, error) {
@@ -83,26 +111,35 @@ func (hm *HashMap[K, V]) Get(key K) (V, error) {
 		return zero, ErrClosed
 	}
 
-	if value, ok := hm.m[key]; ok {
-		return value, nil
-	}
+	c := hm.pool.Get().(*Context[K, V])
+	c.handlers = hm.getHandlers
+	c.index, c.action, c.key = -1, ActionGet, key
 
-	return zero, ErrKeyNotFound
+	c.Next()
+	value, err := c.value, c.err
+
+	c.reset()
+	hm.pool.Put(c)
+
+	return value, err
 }
 
 func (hm *HashMap[K, V]) Delete(key K) {
-	if hm == nil {
+	if (hm == nil) || (hm.m == nil) {
 		return
 	}
 
-	if hm.m == nil {
-		return
-	}
+	c := hm.pool.Get().(*Context[K, V])
+	c.handlers = hm.deleteHandlers
+	c.index, c.action, c.key = -1, ActionDelete, key
 
-	delete(hm.m, key)
+	c.Next()
+
+	c.reset()
+	hm.pool.Put(c)
 }
 
-func (hm *HashMap[K, V]) All(f func(K, V, any) (int, error), arg any) (int, error) {
+func (hm *HashMap[K, V]) All(fn func(K, V) (int, error)) (int, error) {
 	if hm == nil {
 		return 0, ErrNil
 	}
@@ -111,13 +148,13 @@ func (hm *HashMap[K, V]) All(f func(K, V, any) (int, error), arg any) (int, erro
 		return 0, ErrClosed
 	}
 
-	if f == nil {
+	if fn == nil {
 		return 0, ErrCbNil
 	}
 
 	sum := 0
 	for key, value := range hm.m {
-		res, err := f(key, value, arg)
+		res, err := fn(key, value)
 		if err != nil {
 			return sum, err
 		}
@@ -127,7 +164,7 @@ func (hm *HashMap[K, V]) All(f func(K, V, any) (int, error), arg any) (int, erro
 	return sum, nil
 }
 
-func (hm *HashMap[K, V]) Do(key K, f func(K, V, any) (int, error), arg any) (int, error) {
+func (hm *HashMap[K, V]) Do(key K, fn func(K, V) (int, error)) (int, error) {
 	if hm == nil {
 		return 0, ErrNil
 	}
@@ -136,24 +173,28 @@ func (hm *HashMap[K, V]) Do(key K, f func(K, V, any) (int, error), arg any) (int
 		return 0, ErrClosed
 	}
 
-	if f == nil {
+	if fn == nil {
 		return 0, ErrCbNil
 	}
 
 	value, ok := hm.m[key]
 	if ok {
-		return f(key, value, arg)
+		return fn(key, value)
 	}
 
 	return 0, ErrKeyNotFound
 }
 
-func (hm *HashMap[K, V]) Len() int {
-	if hm == nil {
-		return 0
+func (hm *HashMap[K, V]) Use(handlerFunc ...HandlerFunc[K, V]) {
+	if (hm == nil) || (hm.m == nil) {
+		return
 	}
 
-	if hm.m == nil {
+	hm.rebuildHandlers(handlerFunc...)
+}
+
+func (hm *HashMap[K, V]) Len() int {
+	if (hm == nil) || (hm.m == nil) {
 		return 0
 	}
 
@@ -161,90 +202,59 @@ func (hm *HashMap[K, V]) Len() int {
 }
 
 func (hm *HashMap[K, V]) Cap() int {
-	if hm == nil {
-		return 0
-	}
-
-	if hm.m == nil {
+	if (hm == nil) || (hm.m == nil) {
 		return 0
 	}
 
 	return hm.cap
 }
 
-func (hm *HashMap[K, V]) AllSafe(f func(K, V, any) (int, error), arg any) (sum int, err error) {
-	if hm == nil {
-		return 0, ErrNil
+func (hm *HashMap[K, V]) rebuildHandlers(handlerFunc ...HandlerFunc[K, V]) {
+	hm.handlers = append(hm.handlers, handlerFunc...)
+
+	hm.putHandlers = make([]HandlerFunc[K, V], len(hm.handlers)+1)
+	copy(hm.putHandlers, hm.handlers)
+	hm.putHandlers[len(hm.handlers)] = func(c *Context[K, V]) {
+		c.err = hm.put(c.key, c.value)
 	}
 
-	if hm.m == nil {
-		return 0, ErrClosed
+	hm.getHandlers = make([]HandlerFunc[K, V], len(hm.handlers)+1)
+	copy(hm.getHandlers, hm.handlers)
+	hm.getHandlers[len(hm.handlers)] = func(c *Context[K, V]) {
+		c.value, c.err = hm.get(c.key)
 	}
 
-	if f == nil {
-		return 0, ErrCbNil
+	hm.deleteHandlers = make([]HandlerFunc[K, V], len(hm.handlers)+1)
+	copy(hm.deleteHandlers, hm.handlers)
+	hm.deleteHandlers[len(hm.handlers)] = func(c *Context[K, V]) {
+		hm.delete(c.key)
 	}
-
-	defer func() {
-		if r := recover(); r != nil {
-			sum = 0
-			err = fmt.Errorf("HashMap fail(panic: %+v)", r)
-		}
-	}()
-
-	var snap map[K]V
-	func() {
-		hm.RLock()
-		defer hm.RUnlock()
-
-		snap = make(map[K]V, len(hm.m))
-		maps.Copy(snap, hm.m)
-	}()
-
-	for k, v := range snap {
-		ret, err := f(k, v, arg)
-		if err != nil {
-			return sum, err
-		}
-		sum += ret
-	}
-
-	return sum, nil
 }
 
-func (hm *HashMap[K, V]) DoSafe(key K, f func(K, V, any) (int, error), arg any) (ret int, err error) {
-	if hm == nil {
-		return 0, ErrNil
+func (hm *HashMap[K, V]) put(key K, value V) error {
+	if len(hm.m) >= hm.cap {
+		return ErrFull
 	}
 
-	if hm.m == nil {
-		return 0, ErrClosed
+	if _, ok := hm.m[key]; ok {
+		return ErrDupKey
 	}
 
-	if f == nil {
-		return 0, ErrCbNil
+	hm.m[key] = value
+
+	return nil
+}
+
+func (hm *HashMap[K, V]) get(key K) (V, error) {
+	var zero V
+
+	if value, ok := hm.m[key]; ok {
+		return value, nil
 	}
 
-	defer func() {
-		if r := recover(); r != nil {
-			ret = 0
-			err = fmt.Errorf("HashMap fail(panic: %+v)", r)
-		}
-	}()
+	return zero, ErrKeyNotFound
+}
 
-	var snap map[K]V
-	func() {
-		hm.RLock()
-		defer hm.RUnlock()
-
-		snap = make(map[K]V, len(hm.m))
-		maps.Copy(snap, hm.m)
-	}()
-
-	v, ok := snap[key]
-	if ok {
-		return f(key, v, arg)
-	}
-
-	return 0, ErrKeyNotFound
+func (hm *HashMap[K, V]) delete(key K) {
+	delete(hm.m, key)
 }
