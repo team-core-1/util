@@ -188,6 +188,8 @@ func (ip *IndexPool[T]) rebuildHandlers(handlerFunc ...HandlerFunc[T]) {
 	copy(ip.accessHandlers, ip.handlers)
 	ip.accessHandlers[len(ip.handlers)] = func(c *Context[T]) {
 		c.err = ip.access(c.idx, c.fn)
+		// 동기화가 필요하면 Sync 메서드 사용
+		// c.err = ip.accessSync(c.idx, c.fn)
 	}
 }
 
@@ -248,6 +250,30 @@ func (ip *IndexPool[T]) access(index int, fn func(*T)) error {
 		slot.state &^= StateInUse
 		slot.mu.Unlock()
 	}()
+
+	fn(&slot.mem)
+
+	return nil
+}
+
+func (ip *IndexPool[T]) accessSync(index int, fn func(*T)) error {
+	slot := &ip.slots[index]
+
+	slot.mu.Lock()
+	// f(&slot.mem)에서 panic 발생 시 복구
+	defer func() {
+		slot.state &^= StateInUse
+		slot.mu.Unlock()
+	}()
+
+	if (slot.state & StateAlloc) != StateAlloc {
+		return ErrNotAllocIndex
+	}
+	if (slot.state & StateInUse) == StateInUse {
+		// 발생할 수 없는 에러
+		return ErrInuseIndex
+	}
+	slot.state |= StateInUse
 
 	fn(&slot.mem)
 
