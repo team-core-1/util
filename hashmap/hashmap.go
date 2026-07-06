@@ -1,6 +1,7 @@
 package hashmap
 
 import (
+	"iter"
 	"sync"
 )
 
@@ -139,29 +140,30 @@ func (hm *HashMap[K, V]) Delete(key K) {
 	hm.pool.Put(c)
 }
 
-func (hm *HashMap[K, V]) All(fn func(K, V) (int, error)) (int, error) {
-	if hm == nil {
-		return 0, ErrNil
-	}
-
-	if hm.m == nil {
-		return 0, ErrClosed
-	}
-
-	if fn == nil {
-		return 0, ErrCbNil
-	}
-
-	sum := 0
-	for key, value := range hm.m {
-		res, err := fn(key, value)
-		if err != nil {
-			return sum, err
+// All은 HashMap의 모든 키-값 쌍을 순회할 수 있는 반복자를 반환합니다.
+// 맵을 순회하는 동안 데이터 일관성을 유지하기 위해 반드시 외부에서 읽기 락을 획득해야 합니다.
+//
+// 사용 예시:
+//
+//	hm.Lock() // or hm.RLock()
+//	for k, v := range hm.All() {
+//		if k == "stop" {
+//			break
+//		}
+//	}
+//	hm.Unlock() // or hm.RUnlock()
+func (hm *HashMap[K, V]) All() iter.Seq2[K, V] {
+	return func(yield func(K, V) bool) {
+		if (hm == nil) || (hm.m == nil) {
+			return
 		}
-		sum += res
-	}
 
-	return sum, nil
+		for k, v := range hm.m {
+			if !yield(k, v) {
+				return
+			}
+		}
+	}
 }
 
 func (hm *HashMap[K, V]) Do(key K, fn func(K, V) (int, error)) (int, error) {
@@ -177,12 +179,37 @@ func (hm *HashMap[K, V]) Do(key K, fn func(K, V) (int, error)) (int, error) {
 		return 0, ErrCbNil
 	}
 
-	value, ok := hm.m[key]
+	v, ok := hm.m[key]
 	if ok {
-		return fn(key, value)
+		return fn(key, v)
 	}
 
 	return 0, ErrKeyNotFound
+}
+
+func (hm *HashMap[K, V]) DoAll(fn func(K, V) (int, error)) (int, error) {
+	if hm == nil {
+		return 0, ErrNil
+	}
+
+	if hm.m == nil {
+		return 0, ErrClosed
+	}
+
+	if fn == nil {
+		return 0, ErrCbNil
+	}
+
+	sum := 0
+	for k, v := range hm.m {
+		res, err := fn(k, v)
+		if err != nil {
+			return sum, err
+		}
+		sum += res
+	}
+
+	return sum, nil
 }
 
 func (hm *HashMap[K, V]) Use(handlerFunc ...HandlerFunc[K, V]) {
