@@ -68,12 +68,12 @@ func TestHashMap(t *testing.T) {
 		record(t, "TestHashMap/BasicOps", "Verify basic Put and Get operations")
 	})
 
-	// 2. All Method Test
+	// 2. All Method Test (iter.Seq2)
 	t.Run("All", func(t *testing.T) {
 		t.Logf("==================================================")
 		t.Logf(" [시험 목적 및 조건]")
-		t.Logf("  - 시험 목적 : All 메서드를 이용한 맵 전체 요소 순회 검증")
-		t.Logf("  - 시험 조건 : 2개의 데이터 삽입 후 순회하며 값 누적")
+		t.Logf("  - 시험 목적 : All 메서드(iter.Seq2)를 이용한 맵 전체 요소 순회 검증")
+		t.Logf("  - 시험 조건 : 2개의 데이터 삽입 후 for-range 순회하며 값 누적")
 		t.Logf("--------------------------------------------------")
 
 		hm, _ := New[int, int](10)
@@ -84,22 +84,52 @@ func TestHashMap(t *testing.T) {
 
 		total := 0
 		hm.RLock()
-		_, err := hm.All(func(k int, v int) (int, error) {
+		for _, v := range hm.All() {
+			total += v
+		}
+		hm.RUnlock()
+
+		if total != 300 {
+			t.Errorf("All failed: expected total 300, got %d", total)
+		}
+
+		t.Logf(" [시험 결과] : 정상 (모든 요소를 for-range 순회하여 누적합 300 달성)")
+		t.Logf("==================================================")
+		record(t, "TestHashMap/All", "Verify All iterator method iterating all key-values")
+	})
+
+	// 2-1. DoAll Method Test (Callback)
+	t.Run("DoAll", func(t *testing.T) {
+		t.Logf("==================================================")
+		t.Logf(" [시험 목적 및 조건]")
+		t.Logf("  - 시험 목적 : DoAll 메서드(콜백)를 이용한 맵 전체 요소 순회 검증")
+		t.Logf("  - 시험 조건 : 2개의 데이터 삽입 후 콜백 순회하며 값 누적")
+		t.Logf("--------------------------------------------------")
+
+		hm, _ := New[int, int](10)
+		hm.Lock()
+		_ = hm.Put(1, 100)
+		_ = hm.Put(2, 200)
+		hm.Unlock()
+
+		total := 0
+		hm.RLock()
+		_, err := hm.DoAll(func(k int, v int) (int, error) {
 			total += v
 			return v, nil
 		})
 		hm.RUnlock()
 
 		if err != nil {
-			t.Errorf("All failed with error: %v", err)
+			t.Errorf("DoAll failed with error: %v", err)
 		}
 		if total != 300 {
-			t.Errorf("All failed: expected total 300, got %d", total)
+			t.Errorf("DoAll failed: expected total 300, got %d", total)
 		}
 
-		t.Logf(" [시험 결과] : 정상 (모든 요소를 정상 순회하여 누적합 300 달성)")
+		t.Logf(" [시험 결과] : 정상 (모든 요소를 콜백 순회하여 누적합 300 달성)")
 		t.Logf("==================================================")
-		record(t, "TestHashMap/All", "Verify All method iterating all key-values")
+		record(t, "TestHashMap/DoAll", "Verify DoAll callback method iterating all key-values")
 	})
 
 	// 3. Do Method Test
@@ -137,7 +167,7 @@ func TestHashMap(t *testing.T) {
 	t.Run("AllDelete", func(t *testing.T) {
 		t.Logf("==================================================")
 		t.Logf(" [시험 목적 및 조건]")
-		t.Logf("  - 시험 목적 : All 메서드로 전체 순회 중에 특정 요소를 삭제하는 의도적 시나리오")
+		t.Logf("  - 시험 목적 : All iterator로 전체 순회 중에 특정 요소를 삭제하는 의도적 시나리오")
 		t.Logf("  - 시험 조건 : Key 1과 2를 넣고 순회 중 Key 1 삭제")
 		t.Logf("--------------------------------------------------")
 
@@ -148,12 +178,11 @@ func TestHashMap(t *testing.T) {
 		hm.Unlock()
 
 		hm.Lock()
-		_, _ = hm.All(func(k int, v int) (int, error) {
+		for k, _ := range hm.All() {
 			if k == 1 {
 				hm.Delete(k)
 			}
-			return 0, nil
-		})
+		}
 		hm.Unlock()
 
 		hm.RLock()
@@ -166,7 +195,7 @@ func TestHashMap(t *testing.T) {
 
 		t.Logf(" [시험 결과] : 정상 (순회 도중 Key 1 삭제 및 확인 완료)")
 		t.Logf("==================================================")
-		record(t, "TestHashMap/AllDelete", "Verify deleting keys during All method iteration")
+		record(t, "TestHashMap/AllDelete", "Verify deleting keys during All iterator method iteration")
 	})
 
 	// 5. Concurrent Stress Test
@@ -208,7 +237,7 @@ func TestHashMap(t *testing.T) {
 		go func() {
 			defer wg.Done()
 			hm.Lock()
-			_, _ = hm.All(func(k, v int) (int, error) {
+			_, _ = hm.DoAll(func(k, v int) (int, error) {
 				_ = hm.Put(k+100, v)
 				_, _ = hm.Get(k)
 				hm.Delete(k)
