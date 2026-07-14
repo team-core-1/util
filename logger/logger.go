@@ -11,10 +11,10 @@ import (
 )
 
 const (
-	LevelDebug = slog.LevelDebug
-	LevelInfo  = slog.LevelInfo
-	LevelWarn  = slog.LevelWarn
-	LevelError = slog.LevelError
+	LogLevelDebug = slog.LevelDebug
+	LogLevelInfo  = slog.LevelInfo
+	LogLevelWarn  = slog.LevelWarn
+	LogLevelError = slog.LevelError
 )
 
 var (
@@ -45,9 +45,23 @@ func Init(path string, level slog.Level) error {
 	logCloser = logWriter
 	levelVar.Set(level)
 
-	handler := slog.NewTextHandler(logWriter, &slog.HandlerOptions{
-		Level: levelVar,
-	})
+	handler := slog.NewTextHandler(logWriter,
+		&slog.HandlerOptions{
+			Level: levelVar,
+			ReplaceAttr: func(groups []string, a slog.Attr) slog.Attr {
+				switch a.Key {
+				case slog.TimeKey:
+					localTimeStr := a.Value.Time().Format("2006-01-02T15:04:05.000")
+					return slog.Attr{
+						Key:   a.Key,
+						Value: slog.StringValue(localTimeStr),
+					}
+				default:
+					return a
+				}
+			},
+		},
+	)
 
 	slog.SetDefault(slog.New(handler))
 
