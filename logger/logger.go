@@ -7,61 +7,97 @@ import (
 	"os"
 	"path/filepath"
 
+	"github.com/lmittmann/tint"
 	"gopkg.in/natefinch/lumberjack.v2"
 )
 
+type LogLevel = slog.Level
+
 const (
-	LogLevelDebug = slog.LevelDebug
-	LogLevelInfo  = slog.LevelInfo
-	LogLevelWarn  = slog.LevelWarn
-	LogLevelError = slog.LevelError
+	LogLevelDebug = LogLevel(slog.LevelDebug)
+	LogLevelInfo  = LogLevel(slog.LevelInfo)
+	LogLevelWarn  = LogLevel(slog.LevelWarn)
+	LogLevelError = LogLevel(slog.LevelError)
 )
+
+type Config struct {
+	Path       string   `json:"path" yaml:"path"`
+	MaxSize    int      `json:"max_size" yaml:"max_size"`
+	MaxBackups int      `json:"max_backups" yaml:"max_backups"`
+	MaxAge     int      `json:"max_age" yaml:"max_age"`
+	Level      LogLevel `json:"level" yaml:"level"`
+}
 
 var (
 	levelVar  = new(slog.LevelVar)
 	logCloser io.Closer
 )
 
-func Init(path string, level slog.Level) error {
+func Init(cfg Config) error {
 	if logCloser != nil {
 		_ = logCloser.Close()
 		logCloser = nil
 	}
 
-	dir := filepath.Dir(path)
+	dir := filepath.Dir(cfg.Path)
 	if err := os.MkdirAll(dir, 0755); err != nil {
 		return err
 	}
 
 	logWriter := &lumberjack.Logger{
-		Filename:   path,
-		MaxSize:    100,
-		MaxBackups: 100,
-		MaxAge:     30,
+		Filename:   cfg.Path,
+		MaxSize:    cfg.MaxSize,
+		MaxBackups: cfg.MaxBackups,
+		MaxAge:     cfg.MaxAge,
 		Compress:   true,
-		LocalTime:  true, // 백업 로테이션 파일명에도 로컬 타임스탬프(밀리초 포함)가 적용되도록 보장
+		LocalTime:  true,
 	}
 
 	logCloser = logWriter
-	levelVar.Set(level)
+	levelVar.Set(cfg.Level)
 
-	handler := slog.NewTextHandler(logWriter,
-		&slog.HandlerOptions{
-			Level: levelVar,
-			ReplaceAttr: func(groups []string, a slog.Attr) slog.Attr {
-				switch a.Key {
-				case slog.TimeKey:
-					localTimeStr := a.Value.Time().Format("2006-01-02T15:04:05.000")
-					return slog.Attr{
-						Key:   a.Key,
-						Value: slog.StringValue(localTimeStr),
+	handler := tint.NewHandler(logWriter, &tint.Options{
+		Level:      levelVar,
+		TimeFormat: "2006-01-02T15:04:05.000",
+		NoColor:    true,
+	})
+
+	/*
+		handler := slog.NewTextHandler(logWriter,
+			&slog.HandlerOptions{
+				Level: levelVar,
+				ReplaceAttr: func(groups []string, attr slog.Attr) slog.Attr {
+					switch attr.Key {
+					case slog.TimeKey:
+						return slog.Attr{
+							Key:   attr.Key,
+							Value: slog.StringValue(attr.Value.Time().Format("2006-01-02T15:04:05.000")),
+						}
+					case slog.LevelKey:
+						return slog.Attr{
+							Key: attr.Key,
+							Value: slog.StringValue(func() string {
+								switch attr.Value.String() {
+								case "DEBUG":
+									return "[DEBUG]"
+								case "INFO":
+									return "[_INFO]"
+								case "WARN":
+									return "[_WARN]"
+								case "ERROR":
+									return "[ERROR]"
+								default:
+									return attr.Value.String()
+								}
+							}()),
+						}
+					default:
+						return attr
 					}
-				default:
-					return a
-				}
+				},
 			},
-		},
-	)
+		)
+	*/
 
 	slog.SetDefault(slog.New(handler))
 
@@ -75,7 +111,13 @@ func Init(path string, level slog.Level) error {
 // 메인 고루틴에서 panic이 발생해 프로세스가 강제 종료될 때도 마지막 로그가 누락 없이 디스크에 기록됩니다:
 //
 //	func main() {
-//	    if err := logger.Init("app.log", logger.LevelInfo); err != nil {
+//	    if err := logger.Init(logger.Config{
+//	        Path:       "app.log",
+//	        MaxSize:    100,
+//	        MaxBackups: 100,
+//	        MaxAge:     30,
+//	        Level:      logger.LogLevelInfo,
+//	    }); err != nil {
 //	        panic(err)
 //	    }
 //	    defer logger.Close()
@@ -107,11 +149,11 @@ func Close() error {
 	return nil
 }
 
-func SetLogLevel(level slog.Level) {
+func SetLogLevel(level LogLevel) {
 	levelVar.Set(level)
 }
 
-func GetLogLevel() slog.Level {
+func GetLogLevel() LogLevel {
 	return levelVar.Level()
 }
 
