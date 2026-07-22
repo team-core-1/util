@@ -39,6 +39,16 @@ func Init(cfg Config) error {
 		logCloser = nil
 	}
 
+	if cfg.MaxSize == 0 {
+		cfg.MaxSize = 100
+	}
+	if cfg.MaxBackups == 0 {
+		cfg.MaxBackups = 100
+	}
+	if cfg.MaxAge == 0 {
+		cfg.MaxAge = 30
+	}
+
 	dir := filepath.Dir(cfg.Path)
 	if err := os.MkdirAll(dir, 0755); err != nil {
 		return err
@@ -61,43 +71,6 @@ func Init(cfg Config) error {
 		TimeFormat: "2006-01-02T15:04:05.000",
 		NoColor:    true,
 	})
-
-	/*
-		handler := slog.NewTextHandler(logWriter,
-			&slog.HandlerOptions{
-				Level: levelVar,
-				ReplaceAttr: func(groups []string, attr slog.Attr) slog.Attr {
-					switch attr.Key {
-					case slog.TimeKey:
-						return slog.Attr{
-							Key:   attr.Key,
-							Value: slog.StringValue(attr.Value.Time().Format("2006-01-02T15:04:05.000")),
-						}
-					case slog.LevelKey:
-						return slog.Attr{
-							Key: attr.Key,
-							Value: slog.StringValue(func() string {
-								switch attr.Value.String() {
-								case "DEBUG":
-									return "[DEBUG]"
-								case "INFO":
-									return "[_INFO]"
-								case "WARN":
-									return "[_WARN]"
-								case "ERROR":
-									return "[ERROR]"
-								default:
-									return attr.Value.String()
-								}
-							}()),
-						}
-					default:
-						return attr
-					}
-				},
-			},
-		)
-	*/
 
 	slog.SetDefault(slog.New(handler))
 
