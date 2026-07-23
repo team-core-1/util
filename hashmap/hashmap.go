@@ -33,7 +33,7 @@ const (
 
 type HandlerFunc[K comparable, V any] func(*Context[K, V])
 
-type HashMap[K comparable, V any] struct {
+type Map[K comparable, V any] struct {
 	sync.RWMutex
 	m   map[K]V
 	cap int
@@ -45,12 +45,12 @@ type HashMap[K comparable, V any] struct {
 	deleteHandlers []HandlerFunc[K, V]
 }
 
-func New[K comparable, V any](capacity int) (*HashMap[K, V], error) {
+func New[K comparable, V any](capacity int) (*Map[K, V], error) {
 	if capacity <= 0 {
 		return nil, ErrInvalidCap
 	}
 
-	hm := &HashMap[K, V]{
+	hm := &Map[K, V]{
 		cap: capacity,
 	}
 
@@ -65,7 +65,7 @@ func New[K comparable, V any](capacity int) (*HashMap[K, V], error) {
 	return hm, nil
 }
 
-func (hm *HashMap[K, V]) Close() {
+func (hm *Map[K, V]) Close() {
 	if hm == nil {
 		return
 	}
@@ -79,7 +79,7 @@ func (hm *HashMap[K, V]) Close() {
 	hm.m = nil
 }
 
-func (hm *HashMap[K, V]) Put(key K, value V) error {
+func (hm *Map[K, V]) Put(key K, value V) error {
 	if hm == nil {
 		return ErrNil
 	}
@@ -89,19 +89,19 @@ func (hm *HashMap[K, V]) Put(key K, value V) error {
 	}
 
 	c := hm.pool.Get().(*Context[K, V])
+	defer func() {
+		c.reset()
+		hm.pool.Put(c)
+	}()
+
 	c.handlers = hm.putHandlers
+
 	c.index, c.action, c.key, c.value = -1, ActionPut, key, value
-
 	c.Next()
-	err := c.err
-
-	c.reset()
-	hm.pool.Put(c)
-
-	return err
+	return c.err
 }
 
-func (hm *HashMap[K, V]) Get(key K) (V, error) {
+func (hm *Map[K, V]) Get(key K) (V, error) {
 	var zero V
 
 	if hm == nil {
@@ -113,34 +113,36 @@ func (hm *HashMap[K, V]) Get(key K) (V, error) {
 	}
 
 	c := hm.pool.Get().(*Context[K, V])
+	defer func() {
+		c.reset()
+		hm.pool.Put(c)
+	}()
+
 	c.handlers = hm.getHandlers
+
 	c.index, c.action, c.key = -1, ActionGet, key
-
 	c.Next()
-	value, err := c.value, c.err
-
-	c.reset()
-	hm.pool.Put(c)
-
-	return value, err
+	return c.value, c.err
 }
 
-func (hm *HashMap[K, V]) Delete(key K) {
+func (hm *Map[K, V]) Delete(key K) {
 	if (hm == nil) || (hm.m == nil) {
 		return
 	}
 
 	c := hm.pool.Get().(*Context[K, V])
+	defer func() {
+		c.reset()
+		hm.pool.Put(c)
+	}()
+
 	c.handlers = hm.deleteHandlers
+
 	c.index, c.action, c.key = -1, ActionDelete, key
-
 	c.Next()
-
-	c.reset()
-	hm.pool.Put(c)
 }
 
-// All은 HashMap의 모든 키-값 쌍을 순회할 수 있는 반복자를 반환합니다.
+// All은 Map의 모든 키-값 쌍을 순회할 수 있는 반복자를 반환합니다.
 // 맵을 순회하는 동안 데이터 일관성을 유지하기 위해 반드시 외부에서 읽기 락을 획득해야 합니다.
 //
 // 사용 예시:
@@ -152,7 +154,7 @@ func (hm *HashMap[K, V]) Delete(key K) {
 //		}
 //	}
 //	hm.Unlock() // or hm.RUnlock()
-func (hm *HashMap[K, V]) All() iter.Seq2[K, V] {
+func (hm *Map[K, V]) All() iter.Seq2[K, V] {
 	return func(yield func(K, V) bool) {
 		if (hm == nil) || (hm.m == nil) {
 			return
@@ -166,7 +168,7 @@ func (hm *HashMap[K, V]) All() iter.Seq2[K, V] {
 	}
 }
 
-func (hm *HashMap[K, V]) Do(key K, fn func(K, V) (int, error)) (int, error) {
+func (hm *Map[K, V]) Do(key K, fn func(K, V) (int, error)) (int, error) {
 	if hm == nil {
 		return 0, ErrNil
 	}
@@ -187,7 +189,7 @@ func (hm *HashMap[K, V]) Do(key K, fn func(K, V) (int, error)) (int, error) {
 	return 0, ErrKeyNotFound
 }
 
-func (hm *HashMap[K, V]) DoAll(fn func(K, V) (int, error)) (int, error) {
+func (hm *Map[K, V]) DoAll(fn func(K, V) (int, error)) (int, error) {
 	if hm == nil {
 		return 0, ErrNil
 	}
@@ -212,7 +214,7 @@ func (hm *HashMap[K, V]) DoAll(fn func(K, V) (int, error)) (int, error) {
 	return sum, nil
 }
 
-func (hm *HashMap[K, V]) Use(handlerFunc ...HandlerFunc[K, V]) {
+func (hm *Map[K, V]) Use(handlerFunc ...HandlerFunc[K, V]) {
 	if (hm == nil) || (hm.m == nil) {
 		return
 	}
@@ -220,7 +222,7 @@ func (hm *HashMap[K, V]) Use(handlerFunc ...HandlerFunc[K, V]) {
 	hm.rebuildHandlers(handlerFunc...)
 }
 
-func (hm *HashMap[K, V]) Len() int {
+func (hm *Map[K, V]) Len() int {
 	if (hm == nil) || (hm.m == nil) {
 		return 0
 	}
@@ -228,7 +230,7 @@ func (hm *HashMap[K, V]) Len() int {
 	return len(hm.m)
 }
 
-func (hm *HashMap[K, V]) Cap() int {
+func (hm *Map[K, V]) Cap() int {
 	if (hm == nil) || (hm.m == nil) {
 		return 0
 	}
@@ -236,7 +238,7 @@ func (hm *HashMap[K, V]) Cap() int {
 	return hm.cap
 }
 
-func (hm *HashMap[K, V]) rebuildHandlers(handlerFunc ...HandlerFunc[K, V]) {
+func (hm *Map[K, V]) rebuildHandlers(handlerFunc ...HandlerFunc[K, V]) {
 	hm.handlers = append(hm.handlers, handlerFunc...)
 
 	hm.putHandlers = make([]HandlerFunc[K, V], len(hm.handlers)+1)
@@ -258,7 +260,7 @@ func (hm *HashMap[K, V]) rebuildHandlers(handlerFunc ...HandlerFunc[K, V]) {
 	}
 }
 
-func (hm *HashMap[K, V]) put(key K, value V) error {
+func (hm *Map[K, V]) put(key K, value V) error {
 	if len(hm.m) >= hm.cap {
 		return ErrFull
 	}
@@ -272,7 +274,7 @@ func (hm *HashMap[K, V]) put(key K, value V) error {
 	return nil
 }
 
-func (hm *HashMap[K, V]) get(key K) (V, error) {
+func (hm *Map[K, V]) get(key K) (V, error) {
 	var zero V
 
 	if value, ok := hm.m[key]; ok {
@@ -282,6 +284,6 @@ func (hm *HashMap[K, V]) get(key K) (V, error) {
 	return zero, ErrKeyNotFound
 }
 
-func (hm *HashMap[K, V]) delete(key K) {
+func (hm *Map[K, V]) delete(key K) {
 	delete(hm.m, key)
 }

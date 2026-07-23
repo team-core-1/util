@@ -1,4 +1,4 @@
-package indexpool
+package indexmempool
 
 import (
 	"sync"
@@ -11,12 +11,12 @@ func (e ErrorType) Error() string {
 }
 
 const (
-	ErrInvalidCap    = ErrorType("indexPool: invalid capacity")
-	ErrNil           = ErrorType("indexPool: pool is nil")
-	ErrEmpty         = ErrorType("indexPool: pool is empty")
-	ErrWrongIndex    = ErrorType("indexPool: wrong index")
-	ErrNotAllocIndex = ErrorType("indexPool: not alloc index")
-	ErrInuseIndex    = ErrorType("indexPool: inuse index")
+	ErrInvalidCap    = ErrorType("indexmempool: invalid capacity")
+	ErrNil           = ErrorType("indexmempool: pool is nil")
+	ErrEmpty         = ErrorType("indexmempool: pool is empty")
+	ErrWrongIndex    = ErrorType("indexmempool: wrong index")
+	ErrNotAllocIndex = ErrorType("indexmempool: not alloc index")
+	ErrInuseIndex    = ErrorType("indexmempool: inuse index")
 )
 
 type State int
@@ -43,7 +43,7 @@ type slot[T any] struct {
 	mem   T
 }
 
-type IndexPool[T any] struct {
+type Pool[T any] struct {
 	q     chan int
 	slots []slot[T]
 
@@ -55,12 +55,12 @@ type IndexPool[T any] struct {
 	accessHandlers []HandlerFunc[T]
 }
 
-func New[T any](capacity int) (*IndexPool[T], error) {
+func New[T any](capacity int) (*Pool[T], error) {
 	if capacity <= 0 {
 		return nil, ErrInvalidCap
 	}
 
-	ip := &IndexPool[T]{
+	ip := &Pool[T]{
 		q:     make(chan int, capacity),
 		slots: make([]slot[T], capacity),
 	}
@@ -78,27 +78,27 @@ func New[T any](capacity int) (*IndexPool[T], error) {
 	return ip, nil
 }
 
-func (ip *IndexPool[T]) Get() (int, error) {
+func (ip *Pool[T]) Get() (int, error) {
 	if ip == nil {
 		return -1, ErrNil
 	}
 
 	c := ip.pool.Get().(*Context[T])
+	defer func() {
+		c.reset()
+		ip.pool.Put(c)
+	}()
+
 	ip.mu.RLock()
 	c.handlers = ip.getHandlers
 	ip.mu.RUnlock()
+
 	c.index, c.action = -1, ActionGet
-
 	c.Next()
-	idx, err := c.idx, c.err
-
-	c.reset()
-	ip.pool.Put(c)
-
-	return idx, err
+	return c.idx, c.err
 }
 
-func (ip *IndexPool[T]) Put(index int) error {
+func (ip *Pool[T]) Put(index int) error {
 	if ip == nil {
 		return ErrNil
 	}
@@ -108,21 +108,21 @@ func (ip *IndexPool[T]) Put(index int) error {
 	}
 
 	c := ip.pool.Get().(*Context[T])
+	defer func() {
+		c.reset()
+		ip.pool.Put(c)
+	}()
+
 	ip.mu.RLock()
 	c.handlers = ip.putHandlers
 	ip.mu.RUnlock()
+
 	c.index, c.action, c.idx = -1, ActionPut, index
-
 	c.Next()
-	err := c.err
-
-	c.reset()
-	ip.pool.Put(c)
-
-	return err
+	return c.err
 }
 
-func (ip *IndexPool[T]) Access(index int, f func(*T)) error {
+func (ip *Pool[T]) Access(index int, f func(*T)) error {
 	if ip == nil {
 		return ErrNil
 	}
@@ -132,25 +132,25 @@ func (ip *IndexPool[T]) Access(index int, f func(*T)) error {
 	}
 
 	c := ip.pool.Get().(*Context[T])
+	defer func() {
+		c.reset()
+		ip.pool.Put(c)
+	}()
+
 	ip.mu.RLock()
 	c.handlers = ip.accessHandlers
 	ip.mu.RUnlock()
+
 	c.index, c.action, c.idx, c.fn = -1, ActionAccess, index, f
-
 	c.Next()
-	err := c.err
-
-	c.reset()
-	ip.pool.Put(c)
-
-	return err
+	return c.err
 }
 
-func (ip *IndexPool[T]) Use(handlerFunc ...HandlerFunc[T]) {
+func (ip *Pool[T]) Use(handlerFunc ...HandlerFunc[T]) {
 	ip.rebuildHandlers(handlerFunc...)
 }
 
-func (ip *IndexPool[T]) Len() int {
+func (ip *Pool[T]) Len() int {
 	if ip == nil {
 		return 0
 	}
@@ -158,7 +158,7 @@ func (ip *IndexPool[T]) Len() int {
 	return len(ip.q)
 }
 
-func (ip *IndexPool[T]) Cap() int {
+func (ip *Pool[T]) Cap() int {
 	if ip == nil {
 		return 0
 	}
@@ -166,7 +166,7 @@ func (ip *IndexPool[T]) Cap() int {
 	return cap(ip.q)
 }
 
-func (ip *IndexPool[T]) rebuildHandlers(handlerFunc ...HandlerFunc[T]) {
+func (ip *Pool[T]) rebuildHandlers(handlerFunc ...HandlerFunc[T]) {
 	ip.mu.Lock()
 	defer ip.mu.Unlock()
 
@@ -193,7 +193,7 @@ func (ip *IndexPool[T]) rebuildHandlers(handlerFunc ...HandlerFunc[T]) {
 	}
 }
 
-func (ip *IndexPool[T]) get() (int, error) {
+func (ip *Pool[T]) get() (int, error) {
 	select {
 	case idx := <-ip.q:
 		slot := &ip.slots[idx]
@@ -206,7 +206,7 @@ func (ip *IndexPool[T]) get() (int, error) {
 	}
 }
 
-func (ip *IndexPool[T]) put(index int) error {
+func (ip *Pool[T]) put(index int) error {
 	slot := &ip.slots[index]
 
 	slot.mu.Lock()
@@ -229,7 +229,7 @@ func (ip *IndexPool[T]) put(index int) error {
 	return nil
 }
 
-func (ip *IndexPool[T]) access(index int, fn func(*T)) error {
+func (ip *Pool[T]) access(index int, fn func(*T)) error {
 	slot := &ip.slots[index]
 
 	slot.mu.Lock()
@@ -256,7 +256,7 @@ func (ip *IndexPool[T]) access(index int, fn func(*T)) error {
 	return nil
 }
 
-func (ip *IndexPool[T]) accessSync(index int, fn func(*T)) error {
+func (ip *Pool[T]) accessSync(index int, fn func(*T)) error {
 	slot := &ip.slots[index]
 
 	slot.mu.Lock()

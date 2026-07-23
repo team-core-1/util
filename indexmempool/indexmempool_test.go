@@ -1,4 +1,4 @@
-package indexpool
+package indexmempool
 
 import (
 	"fmt"
@@ -36,7 +36,7 @@ func TestMain(m *testing.M) {
 	os.Exit(exitCode)
 }
 
-func TestIndexPool_Basic(t *testing.T) {
+func TestPool_Basic(t *testing.T) {
 	const capacity = 5
 	ip, err := New[string](capacity)
 	if err != nil {
@@ -81,7 +81,7 @@ func TestIndexPool_Basic(t *testing.T) {
 	record(t, "Basic Get/Put/Access verified")
 }
 
-func TestIndexPool_Errors(t *testing.T) {
+func TestPool_Errors(t *testing.T) {
 	const capacity = 2
 	ip, _ := New[int](capacity)
 
@@ -133,7 +133,7 @@ func TestIndexPool_Errors(t *testing.T) {
 	record(t, "Errors and edge cases verified")
 }
 
-func TestIndexPool_Concurrency(t *testing.T) {
+func TestPool_Concurrency(t *testing.T) {
 	const capacity = 10
 	const goroutineCount = 100
 	ip, _ := New[string](capacity)
@@ -188,7 +188,7 @@ func TestIndexPool_Concurrency(t *testing.T) {
 	record(t, fmt.Sprintf("Concurrency tested: Succ:%d, Fail:%d", succCount.Load(), failCount.Load()))
 }
 
-func TestIndexPool_AccessConcurrency(t *testing.T) {
+func TestPool_AccessConcurrency(t *testing.T) {
 	const capacity = 1
 	const goroutineCount = 50
 	ip, _ := New[int](capacity)
@@ -264,7 +264,7 @@ func TestIndexPool_AccessConcurrency(t *testing.T) {
 	record(t, fmt.Sprintf("Access concurrency verified (Succ: 1, InUseBlocked: %d)", accessFailInuseCount.Load()))
 }
 
-func TestIndexPool_AccessPanicRecovery(t *testing.T) {
+func TestPool_AccessPanicRecovery(t *testing.T) {
 	const capacity = 1
 	ip, _ := New[int](capacity)
 

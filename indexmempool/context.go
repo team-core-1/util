@@ -1,4 +1,4 @@
-package indexpool
+package indexmempool
 
 type Context[T any] struct {
 	index    int

@@ -5,9 +5,8 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/team-core-1/util/queue"
-
 	"github.com/RussellLuo/timingwheel"
+	"github.com/team-core-1/util/pipequeue"
 )
 
 type ErrorType string
@@ -39,7 +38,7 @@ type Engine[T any] struct {
 	mu          sync.RWMutex
 	isClosed    bool
 	timingWheel *timingwheel.TimingWheel
-	q           *queue.Queue[T]
+	pq          *pipequeue.Queue[T]
 	pool        sync.Pool
 
 	qFail  atomic.Int64 // queue 문제로 처리하지 못한 timeout
@@ -66,14 +65,14 @@ func New[T any](timingWheel *timingwheel.TimingWheel, capacity int) (*Engine[T],
 		return nil, ErrInvalidCap
 	}
 
-	q, err := queue.New[T](capacity)
+	pq, err := pipequeue.New[T](capacity)
 	if err != nil {
 		return nil, err
 	}
 
 	engine := &Engine[T]{
 		timingWheel: timingWheel,
-		q:           q,
+		pq:          pq,
 		cap:         capacity,
 	}
 
@@ -99,7 +98,7 @@ func (engine *Engine[T]) Close() {
 	}
 
 	engine.isClosed = true
-	engine.q.Close()
+	engine.pq.Close()
 }
 
 func (engine *Engine[T]) Set(d time.Duration, key T) (*Timer, error) {
@@ -119,9 +118,7 @@ func (engine *Engine[T]) Set(d time.Duration, key T) (*Timer, error) {
 
 	c.index, c.action, c.dur, c.key = -1, ActionSet, d, key
 	c.Next()
-	timer, err := c.timer, c.err
-
-	return timer, err
+	return c.timer, c.err
 }
 
 func (engine *Engine[T]) Cancel(timer *Timer) error {
@@ -141,9 +138,7 @@ func (engine *Engine[T]) Cancel(timer *Timer) error {
 
 	c.index, c.action, c.timer = -1, ActionCancel, timer
 	c.Next()
-	err := c.err
-
-	return err
+	return c.err
 }
 
 func (engine *Engine[T]) C() <-chan T {
@@ -151,7 +146,7 @@ func (engine *Engine[T]) C() <-chan T {
 		return nil
 	}
 
-	return engine.q.C()
+	return engine.pq.C()
 }
 
 func (engine *Engine[T]) Use(handlerFunc ...HandlerFunc[T]) {
@@ -170,7 +165,7 @@ func (engine *Engine[T]) Len() int {
 	engine.mu.RLock()
 	defer engine.mu.RUnlock()
 
-	return int(engine.active.Load()) + engine.q.Len()
+	return int(engine.active.Load()) + engine.pq.Len()
 }
 
 func (engine *Engine[T]) Cap() int {
@@ -242,7 +237,7 @@ func (engine *Engine[T]) setTimer(d time.Duration, key T) (*Timer, error) {
 	// full이면 에러를 리턴하고, 경합이면 CAS로 +1하고 루프 탈출
 	for {
 		active := engine.active.Load()
-		if (int(active) + engine.q.Len()) >= engine.cap {
+		if (int(active) + engine.pq.Len()) >= engine.cap {
 			return nil, ErrExpiredQFull
 		}
 		if engine.active.CompareAndSwap(active, active+1) {
@@ -310,7 +305,7 @@ func (engine *Engine[T]) cancelTimer(timer *Timer) error {
 }
 
 func (engine *Engine[T]) timeout(key T) error {
-	if err := engine.q.Enqueue(key); err != nil {
+	if err := engine.pq.Enqueue(key); err != nil {
 		engine.qFail.Add(1)
 		return ErrExpiredQFail
 	}

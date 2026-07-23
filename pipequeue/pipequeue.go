@@ -11,11 +11,11 @@ func (e ErrorType) Error() string {
 }
 
 const (
-	ErrInvalidCap = ErrorType("PipeQueue fail(invalid capacity)")
-	ErrNil        = ErrorType("PipeQueue fail(nil)")
-	ErrClosed     = ErrorType("PipeQueue fail(closed)")
-	ErrFull       = ErrorType("PipeQueue fail(enqueue full)")
-	ErrEmpty      = ErrorType("PipeQueue fail(dequeue empty)")
+	ErrInvalidCap = ErrorType("pipequeue fail(invalid capacity)")
+	ErrNil        = ErrorType("pipequeue fail(nil)")
+	ErrClosed     = ErrorType("pipequeue fail(closed)")
+	ErrFull       = ErrorType("pipequeue fail(enqueue full)")
+	ErrEmpty      = ErrorType("pipequeue fail(dequeue empty)")
 )
 
 type ActionType int
@@ -28,7 +28,7 @@ const (
 
 type HandlerFunc[T any] func(*Context[T])
 
-type PipeQueue[T any] struct {
+type Queue[T any] struct {
 	mu       sync.RWMutex
 	isClosed bool
 	inCh     chan T
@@ -42,12 +42,12 @@ type PipeQueue[T any] struct {
 	pipeHandlers    []HandlerFunc[T]
 }
 
-func New[T any](capacity int) (*PipeQueue[T], error) {
+func New[T any](capacity int) (*Queue[T], error) {
 	if capacity <= 0 {
 		return nil, ErrInvalidCap
 	}
 
-	q := &PipeQueue[T]{
+	q := &Queue[T]{
 		inCh:     make(chan T, capacity),
 		outCh:    make(chan T),
 		closeSig: make(chan struct{}),
@@ -66,7 +66,7 @@ func New[T any](capacity int) (*PipeQueue[T], error) {
 
 // Close를 호출하면 PipeQueue 자원이 모두 해제되기 때문에
 // select case에서 사용하던 PipeQueue는 nil로 변경해야 함.
-func (q *PipeQueue[T]) Close() {
+func (q *Queue[T]) Close() {
 	if q == nil {
 		return
 	}
@@ -85,27 +85,27 @@ func (q *PipeQueue[T]) Close() {
 	close(q.closeSig) // pipe 고루틴을 종료
 }
 
-func (q *PipeQueue[T]) Enqueue(data T) error {
+func (q *Queue[T]) Enqueue(data T) error {
 	if q == nil {
 		return ErrNil
 	}
 
 	c := q.pool.Get().(*Context[T])
+	defer func() {
+		c.reset()
+		q.pool.Put(c)
+	}()
+
 	q.mu.RLock()
 	c.handlers = q.enqueueHandlers
 	q.mu.RUnlock()
+
 	c.index, c.action, c.data = -1, ActionEnqueue, data
-
 	c.Next()
-	err := c.err
-
-	c.reset()
-	q.pool.Put(c)
-
-	return err
+	return c.err
 }
 
-func (q *PipeQueue[T]) Dequeue() (T, error) {
+func (q *Queue[T]) Dequeue() (T, error) {
 	var zero T
 
 	if q == nil {
@@ -113,21 +113,21 @@ func (q *PipeQueue[T]) Dequeue() (T, error) {
 	}
 
 	c := q.pool.Get().(*Context[T])
+	defer func() {
+		c.reset()
+		q.pool.Put(c)
+	}()
+
 	q.mu.RLock()
 	c.handlers = q.dequeueHandlers
 	q.mu.RUnlock()
+
 	c.index, c.action = -1, ActionDequeue
-
 	c.Next()
-	data, err := c.data, c.err
-
-	c.reset()
-	q.pool.Put(c)
-
-	return data, err
+	return c.data, c.err
 }
 
-func (q *PipeQueue[T]) C() <-chan T {
+func (q *Queue[T]) C() <-chan T {
 	if q == nil {
 		return nil
 	}
@@ -135,7 +135,7 @@ func (q *PipeQueue[T]) C() <-chan T {
 	return q.outCh
 }
 
-func (q *PipeQueue[T]) Use(handlerFunc ...HandlerFunc[T]) {
+func (q *Queue[T]) Use(handlerFunc ...HandlerFunc[T]) {
 	if q == nil {
 		return
 	}
@@ -143,7 +143,7 @@ func (q *PipeQueue[T]) Use(handlerFunc ...HandlerFunc[T]) {
 	q.rebuildHandlers(handlerFunc...)
 }
 
-func (q *PipeQueue[T]) Len() int {
+func (q *Queue[T]) Len() int {
 	if q == nil {
 		return 0
 	}
@@ -155,7 +155,7 @@ func (q *PipeQueue[T]) Len() int {
 	return len(q.inCh)
 }
 
-func (q *PipeQueue[T]) Cap() int {
+func (q *Queue[T]) Cap() int {
 	if q == nil {
 		return 0
 	}
@@ -167,7 +167,7 @@ func (q *PipeQueue[T]) Cap() int {
 	return cap(q.inCh)
 }
 
-func (q *PipeQueue[T]) IsFull() bool {
+func (q *Queue[T]) IsFull() bool {
 	if q == nil {
 		return false
 	}
@@ -179,7 +179,7 @@ func (q *PipeQueue[T]) IsFull() bool {
 	return len(q.inCh) == cap(q.inCh)
 }
 
-func (q *PipeQueue[T]) IsClosed() bool {
+func (q *Queue[T]) IsClosed() bool {
 	if q == nil {
 		return true
 	}
@@ -190,7 +190,7 @@ func (q *PipeQueue[T]) IsClosed() bool {
 	return q.isClosed
 }
 
-func (q *PipeQueue[T]) rebuildHandlers(handlerFunc ...HandlerFunc[T]) {
+func (q *Queue[T]) rebuildHandlers(handlerFunc ...HandlerFunc[T]) {
 	q.mu.Lock()
 	defer q.mu.Unlock()
 
@@ -220,7 +220,7 @@ func (q *PipeQueue[T]) rebuildHandlers(handlerFunc ...HandlerFunc[T]) {
 	}
 }
 
-func (q *PipeQueue[T]) pipe() {
+func (q *Queue[T]) pipe() {
 	if q == nil {
 		return
 	}
@@ -236,8 +236,8 @@ func (q *PipeQueue[T]) pipe() {
 			q.mu.RLock()
 			c.handlers = q.pipeHandlers
 			q.mu.RUnlock()
-			c.index, c.action, c.data = -1, ActionPipe, data
 
+			c.index, c.action, c.data = -1, ActionPipe, data
 			c.Next()
 
 			c.reset()
@@ -249,7 +249,7 @@ func (q *PipeQueue[T]) pipe() {
 	}
 }
 
-func (q *PipeQueue[T]) enqueue(data T) (err error) {
+func (q *Queue[T]) enqueue(data T) (err error) {
 	// RLock을 사용해도 채널에서 동기화 가능
 	q.mu.RLock()
 	defer q.mu.RUnlock()
@@ -266,7 +266,7 @@ func (q *PipeQueue[T]) enqueue(data T) (err error) {
 	}
 }
 
-func (q *PipeQueue[T]) dequeue() (T, error) {
+func (q *Queue[T]) dequeue() (T, error) {
 	var zero T
 
 	// RLock을 사용해도 채널에서 동기화 가능
@@ -288,7 +288,7 @@ func (q *PipeQueue[T]) dequeue() (T, error) {
 	}
 }
 
-func (q *PipeQueue[T]) write(data T) {
+func (q *Queue[T]) write(data T) {
 	select {
 	case <-q.closeSig:
 		return
