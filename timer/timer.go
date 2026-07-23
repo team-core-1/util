@@ -16,12 +16,12 @@ func (e ErrorType) Error() string {
 }
 
 const (
-	ErrInvalidCap       = ErrorType("Timer fail(invalid capacity)")
-	ErrNil              = ErrorType("Timer fail(nil)")
-	ErrClosed           = ErrorType("Timer fail(closed)")
-	ErrExpiredQFull     = ErrorType("Timer fail(expired queue full)")
-	ErrAlreadyCancelled = ErrorType("Timer fail(already cancelled timer)")
-	ErrExpiredQFail     = ErrorType("Timer fail(expired queue fail)")
+	ErrInvalidCap       = ErrorType("timer fail(invalid capacity)")
+	ErrNil              = ErrorType("timer fail(nil)")
+	ErrClosed           = ErrorType("timer fail(closed)")
+	ErrExpiredQFull     = ErrorType("timer fail(expired queue full)")
+	ErrAlreadyCancelled = ErrorType("timer fail(already cancelled timer)")
+	ErrExpiredQFail     = ErrorType("timer fail(expired queue fail)")
 )
 
 type ActionType int
