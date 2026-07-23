@@ -34,7 +34,7 @@ const (
 type HandlerFunc[K comparable, V any] func(*Context[K, V])
 
 type Map[K comparable, V any] struct {
-	sync.RWMutex
+	mu  sync.RWMutex
 	m   map[K]V
 	cap int
 
@@ -70,6 +70,9 @@ func (hm *Map[K, V]) Close() {
 		return
 	}
 
+	hm.mu.Lock()
+	defer hm.mu.Unlock()
+
 	if hm.m == nil {
 		return
 	}
@@ -83,6 +86,9 @@ func (hm *Map[K, V]) Put(key K, value V) error {
 	if hm == nil {
 		return ErrNil
 	}
+
+	hm.mu.Lock()
+	defer hm.mu.Unlock()
 
 	if hm.m == nil {
 		return ErrClosed
@@ -108,6 +114,9 @@ func (hm *Map[K, V]) Get(key K) (V, error) {
 		return zero, ErrNil
 	}
 
+	hm.mu.RLock()
+	defer hm.mu.RUnlock()
+
 	if hm.m == nil {
 		return zero, ErrClosed
 	}
@@ -126,7 +135,14 @@ func (hm *Map[K, V]) Get(key K) (V, error) {
 }
 
 func (hm *Map[K, V]) Delete(key K) {
-	if (hm == nil) || (hm.m == nil) {
+	if hm == nil {
+		return
+	}
+
+	hm.mu.Lock()
+	defer hm.mu.Unlock()
+
+	if hm.m == nil {
 		return
 	}
 
@@ -142,23 +158,40 @@ func (hm *Map[K, V]) Delete(key K) {
 	c.Next()
 }
 
-// All은 Map의 모든 키-값 쌍을 순회할 수 있는 반복자를 반환합니다.
-// 맵을 순회하는 동안 데이터 일관성을 유지하기 위해 반드시 외부에서 읽기 락을 획득해야 합니다.
+// All은 Map의 모든 키-값 쌍을 순회할 수 있는 반복자(iter.Seq2)를 반환합니다.
 //
-// 사용 예시:
+// [동시성 및 주의사항]
+//   - 순회하는 동안 내부적으로 읽기 락(RLock)을 유지합니다.
+//   - 순회 루프(for-range) 내부에서 Put(), Delete(), Close() 등의 쓰기 메서드를 직접 호출하면
+//     동일 고루틴에서 데드락(Self-Deadlock)이 발생하므로 절대로 직접 호출하지 마십시오.
+//   - 순회 중 요소를 삭제하거나 수정해야 하는 경우, 아래 예시와 같이 대상 키를 별도 슬라이스에
+//     수집한 후 순회 루프 밖에서 처리하십시오.
 //
-//	hm.Lock() // or hm.RLock()
+// [사용 예시]
+//
+//	// 1. 일반적인 순회
 //	for k, v := range hm.All() {
-//		if k == "stop" {
-//			break
+//		fmt.Println(k, v)
+//	}
+//
+//	// 2. 순회 중 조건부 삭제 (안전한 패턴)
+//	var toDelete []K
+//	for k, v := range hm.All() {
+//		if shouldDelete(k, v) {
+//			toDelete = append(toDelete, k)
 //		}
 //	}
-//	hm.Unlock() // or hm.RUnlock()
+//	for _, k := range toDelete {
+//		hm.Delete(k) // 순회 외부에서 삭제
+//	}
 func (hm *Map[K, V]) All() iter.Seq2[K, V] {
 	return func(yield func(K, V) bool) {
-		if (hm == nil) || (hm.m == nil) {
+		if hm == nil {
 			return
 		}
+
+		hm.mu.RLock()
+		defer hm.mu.RUnlock()
 
 		for k, v := range hm.m {
 			if !yield(k, v) {
@@ -168,10 +201,25 @@ func (hm *Map[K, V]) All() iter.Seq2[K, V] {
 	}
 }
 
+// Do는 지정한 키(key)가 존재할 경우, 해당 키와 값을 인자로 전달하여 콜백 함수(fn)를 실행합니다.
+//
+// [동시성 및 주의사항]
+// - 콜백 함수가 실행되는 동안 읽기 락(RLock)이 유지됩니다.
+// - 콜백 함수(fn) 내부에서 Map의 쓰기 메서드(Put, Delete, Close 등)를 호출하지 마십시오. (데드락 위험)
+// - 콜백 내부에서 시간 복잡도가 높거나 I/O 대기가 발생하는 무거운 작업을 지양하십시오.
+//
+// [사용 예시]
+//
+//	res, err := hm.Do("user1", func(k string, v User) (int, error) {
+//		return v.Age, nil
+//	})
 func (hm *Map[K, V]) Do(key K, fn func(K, V) (int, error)) (int, error) {
 	if hm == nil {
 		return 0, ErrNil
 	}
+
+	hm.mu.RLock()
+	defer hm.mu.RUnlock()
 
 	if hm.m == nil {
 		return 0, ErrClosed
@@ -189,10 +237,25 @@ func (hm *Map[K, V]) Do(key K, fn func(K, V) (int, error)) (int, error) {
 	return 0, ErrKeyNotFound
 }
 
+// DoAll은 Map의 모든 키-값 쌍을 순회하며 콜백 함수(fn)를 실행하고 연산 결과의 합을 반환합니다.
+// 콜백 함수에서 에러가 발생하면 순회를 즉시 중단하고 해당 시점까지의 합계와 에러를 반환합니다.
+//
+// [동시성 및 주의사항]
+// - 순회하는 동안 내부적으로 읽기 락(RLock)을 유지합니다.
+// - 콜백 함수(fn) 내부에서 Map의 쓰기 메서드(Put, Delete, Close 등)를 호출하지 마십시오. (데드락 위험)
+//
+// [사용 예시]
+//
+//	totalSum, err := hm.DoAll(func(k string, v int) (int, error) {
+//		return v, nil
+//	})
 func (hm *Map[K, V]) DoAll(fn func(K, V) (int, error)) (int, error) {
 	if hm == nil {
 		return 0, ErrNil
 	}
+
+	hm.mu.RLock()
+	defer hm.mu.RUnlock()
 
 	if hm.m == nil {
 		return 0, ErrClosed
@@ -215,7 +278,14 @@ func (hm *Map[K, V]) DoAll(fn func(K, V) (int, error)) (int, error) {
 }
 
 func (hm *Map[K, V]) Use(handlerFunc ...HandlerFunc[K, V]) {
-	if (hm == nil) || (hm.m == nil) {
+	if hm == nil {
+		return
+	}
+
+	hm.mu.Lock()
+	defer hm.mu.Unlock()
+
+	if hm.m == nil {
 		return
 	}
 
@@ -223,7 +293,14 @@ func (hm *Map[K, V]) Use(handlerFunc ...HandlerFunc[K, V]) {
 }
 
 func (hm *Map[K, V]) Len() int {
-	if (hm == nil) || (hm.m == nil) {
+	if hm == nil {
+		return 0
+	}
+
+	hm.mu.RLock()
+	defer hm.mu.RUnlock()
+
+	if hm.m == nil {
 		return 0
 	}
 
@@ -231,7 +308,14 @@ func (hm *Map[K, V]) Len() int {
 }
 
 func (hm *Map[K, V]) Cap() int {
-	if (hm == nil) || (hm.m == nil) {
+	if hm == nil {
+		return 0
+	}
+
+	hm.mu.RLock()
+	defer hm.mu.RUnlock()
+
+	if hm.m == nil {
 		return 0
 	}
 

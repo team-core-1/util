@@ -40,21 +40,17 @@ func TestHashMap(t *testing.T) {
 		t.Logf("==================================================")
 		t.Logf(" [시험 목적 및 조건]")
 		t.Logf("  - 시험 목적 : HashMap의 기본 CRUD(Put, Get) 동작 검증")
-		t.Logf("  - 시험 조건 : Capacity: 10, 단일 고루틴, 외부 Lock 사용")
+		t.Logf("  - 시험 조건 : Capacity: 10, 단일 고루틴, 내부 Lock 사용")
 		t.Logf("--------------------------------------------------")
 
 		hm, _ := New[int, string](10)
 
-		hm.Lock()
 		err := hm.Put(1, "one")
-		hm.Unlock()
 		if err != nil {
 			t.Fatalf("Put failed: %v", err)
 		}
 
-		hm.RLock()
 		val, err := hm.Get(1)
-		hm.RUnlock()
 
 		if err != nil {
 			t.Errorf("Get failed: %v", err)
@@ -77,17 +73,13 @@ func TestHashMap(t *testing.T) {
 		t.Logf("--------------------------------------------------")
 
 		hm, _ := New[int, int](10)
-		hm.Lock()
 		_ = hm.Put(1, 100)
 		_ = hm.Put(2, 200)
-		hm.Unlock()
 
 		total := 0
-		hm.RLock()
 		for _, v := range hm.All() {
 			total += v
 		}
-		hm.RUnlock()
 
 		if total != 300 {
 			t.Errorf("All failed: expected total 300, got %d", total)
@@ -107,18 +99,14 @@ func TestHashMap(t *testing.T) {
 		t.Logf("--------------------------------------------------")
 
 		hm, _ := New[int, int](10)
-		hm.Lock()
 		_ = hm.Put(1, 100)
 		_ = hm.Put(2, 200)
-		hm.Unlock()
 
 		total := 0
-		hm.RLock()
 		_, err := hm.DoAll(func(k int, v int) (int, error) {
 			total += v
 			return v, nil
 		})
-		hm.RUnlock()
 
 		if err != nil {
 			t.Errorf("DoAll failed with error: %v", err)
@@ -141,15 +129,11 @@ func TestHashMap(t *testing.T) {
 		t.Logf("--------------------------------------------------")
 
 		hm, _ := New[int, int](10)
-		hm.Lock()
 		_ = hm.Put(1, 10)
-		hm.Unlock()
 
-		hm.RLock()
 		res, err := hm.Do(1, func(k int, v int) (int, error) {
 			return v * 2, nil
 		})
-		hm.RUnlock()
 
 		if err != nil {
 			t.Errorf("Do failed with error: %v", err)
@@ -167,35 +151,33 @@ func TestHashMap(t *testing.T) {
 	t.Run("AllDelete", func(t *testing.T) {
 		t.Logf("==================================================")
 		t.Logf(" [시험 목적 및 조건]")
-		t.Logf("  - 시험 목적 : All iterator로 전체 순회 중에 특정 요소를 삭제하는 의도적 시나리오")
-		t.Logf("  - 시험 조건 : Key 1과 2를 넣고 순회 중 Key 1 삭제")
+		t.Logf("  - 시험 목적 : All iterator 순회 후 수집된 키를 안전하게 삭제하는 패턴 검증")
+		t.Logf("  - 시험 조건 : Key 1과 2를 넣고 순회 후 Key 1 삭제")
 		t.Logf("--------------------------------------------------")
 
 		hm, _ := New[int, int](10)
-		hm.Lock()
 		_ = hm.Put(1, 1)
 		_ = hm.Put(2, 2)
-		hm.Unlock()
 
-		hm.Lock()
-		for k, _ := range hm.All() {
+		var toDelete []int
+		for k := range hm.All() {
 			if k == 1 {
-				hm.Delete(k)
+				toDelete = append(toDelete, k)
 			}
 		}
-		hm.Unlock()
+		for _, k := range toDelete {
+			hm.Delete(k)
+		}
 
-		hm.RLock()
 		_, err := hm.Get(1)
-		hm.RUnlock()
 
 		if err != ErrKeyNotFound {
 			t.Errorf("Key 1 should have been deleted, but got err: %v", err)
 		}
 
-		t.Logf(" [시험 결과] : 정상 (순회 도중 Key 1 삭제 및 확인 완료)")
+		t.Logf(" [시험 결과] : 정상 (순회 후 수집된 Key 1 삭제 및 확인 완료)")
 		t.Logf("==================================================")
-		record(t, "TestHashMap/AllDelete", "Verify deleting keys during All iterator method iteration")
+		record(t, "TestHashMap/AllDelete", "Verify deleting keys after collecting from All iterator method")
 	})
 
 	// 5. Concurrent Stress Test
@@ -213,63 +195,46 @@ func TestHashMap(t *testing.T) {
 			wg.Add(3)
 			go func(val int) {
 				defer wg.Done()
-				hm.Lock()
 				_ = hm.Put(val, val)
-				hm.Unlock()
 			}(i)
 
 			go func(val int) {
 				defer wg.Done()
-				hm.RLock()
 				_, _ = hm.Get(val)
-				hm.RUnlock()
 			}(i)
 
 			go func(val int) {
 				defer wg.Done()
-				hm.Lock()
 				hm.Delete(val)
-				hm.Unlock()
 			}(i)
 		}
 
 		wg.Add(2)
 		go func() {
 			defer wg.Done()
-			hm.Lock()
 			_, _ = hm.DoAll(func(k, v int) (int, error) {
-				_ = hm.Put(k+100, v)
-				_, _ = hm.Get(k)
-				hm.Delete(k)
 				return 0, nil
 			})
-			hm.Unlock()
 		}()
 
 		go func() {
 			defer wg.Done()
-			hm.RLock()
 			_, _ = hm.Do(1, func(k, v int) (int, error) {
 				return v, nil
 			})
-			hm.RUnlock()
 		}()
 
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			hm.Lock()
 			hm.Close()
-			hm.Unlock()
 		}()
 
 		for i := 0; i < 5; i++ {
 			wg.Add(1)
 			go func(val int) {
 				defer wg.Done()
-				hm.Lock()
 				err := hm.Put(val, val)
-				hm.Unlock()
 				if err != nil && err != ErrClosed && err != ErrFull {
 					t.Errorf("Unexpected error after close: %v", err)
 				}
