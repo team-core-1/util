@@ -83,3 +83,28 @@ func TestLogger(t *testing.T) {
 
 	t.Logf("Success! Log file content:\n%s", logContent)
 }
+
+func BenchmarkLogger(b *testing.B) {
+	tempDir, err := os.MkdirTemp("", "logger_bench")
+	if err != nil {
+		b.Fatalf("failed to create temp dir: %v", err)
+	}
+	defer os.RemoveAll(tempDir)
+
+	logPath := filepath.Join(tempDir, "bench.log")
+	_ = Init(Config{
+		Path:       logPath,
+		MaxSize:    100,
+		MaxBackups: 1,
+		MaxAge:     1,
+		Level:      LogLevelInfo,
+	})
+	defer Close()
+
+	b.ResetTimer()
+	b.RunParallel(func(pb *testing.PB) {
+		for pb.Next() {
+			Info("benchmark info message", "user_id", 12345, "status", "ok")
+		}
+	})
+}

@@ -7,7 +7,6 @@ import (
 	"os"
 	"path/filepath"
 
-	"github.com/lmittmann/tint"
 	"gopkg.in/natefinch/lumberjack.v2"
 )
 
@@ -66,10 +65,9 @@ func Init(cfg Config) error {
 	logCloser = logWriter
 	levelVar.Set(cfg.Level)
 
-	handler := tint.NewHandler(logWriter, &tint.Options{
+	handler := NewHandler(logWriter, &handlerOptions{
 		Level:      levelVar,
 		TimeFormat: "2006-01-02T15:04:05.000",
-		NoColor:    true,
 	})
 
 	slog.SetDefault(slog.New(handler))
