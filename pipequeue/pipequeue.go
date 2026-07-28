@@ -34,8 +34,8 @@ type Queue[T any] struct {
 	inCh     chan T
 	outCh    chan T
 	closeSig chan struct{}
-	pool     sync.Pool
 
+	pool            sync.Pool
 	handlers        []HandlerFunc[T]
 	enqueueHandlers []HandlerFunc[T]
 	dequeueHandlers []HandlerFunc[T]

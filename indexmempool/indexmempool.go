@@ -44,10 +44,10 @@ type slot[T any] struct {
 }
 
 type Pool[T any] struct {
+	mu    sync.RWMutex
 	q     chan int
 	slots []slot[T]
 
-	mu             sync.RWMutex
 	pool           sync.Pool
 	handlers       []HandlerFunc[T]
 	getHandlers    []HandlerFunc[T]

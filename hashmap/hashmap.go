@@ -27,8 +27,6 @@ const (
 	ActionPut ActionType = iota + 1
 	ActionGet
 	ActionDelete
-	ActionAll
-	ActionDo
 )
 
 type HandlerFunc[K comparable, V any] func(*Context[K, V])

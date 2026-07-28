@@ -39,12 +39,12 @@ type Engine[T any] struct {
 	isClosed    bool
 	timingWheel *timingwheel.TimingWheel
 	pq          *pipequeue.Queue[T]
-	pool        sync.Pool
 
 	qFail  atomic.Int64 // queue 문제로 처리하지 못한 timeout
 	active atomic.Int64 // queue에 있는 timeout을 제외한 현재 사용 중인 timer
 	cap    int
 
+	pool            sync.Pool
 	handlers        []HandlerFunc[T]
 	setHandlers     []HandlerFunc[T]
 	cancelHandlers  []HandlerFunc[T]
