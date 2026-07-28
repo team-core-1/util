@@ -95,7 +95,7 @@ func (ip *Pool[T]) Get() (int, error) {
 
 	c.index, c.action = -1, ActionGet
 	c.Next()
-	return c.idx, c.err
+	return c.slotIndex, c.err
 }
 
 func (ip *Pool[T]) Put(index int) error {
@@ -117,7 +117,7 @@ func (ip *Pool[T]) Put(index int) error {
 	c.handlers = ip.putHandlers
 	ip.mu.RUnlock()
 
-	c.index, c.action, c.idx = -1, ActionPut, index
+	c.index, c.action, c.slotIndex = -1, ActionPut, index
 	c.Next()
 	return c.err
 }
@@ -141,7 +141,7 @@ func (ip *Pool[T]) Access(index int, f func(*T)) error {
 	c.handlers = ip.accessHandlers
 	ip.mu.RUnlock()
 
-	c.index, c.action, c.idx, c.fn = -1, ActionAccess, index, f
+	c.index, c.action, c.slotIndex, c.fn = -1, ActionAccess, index, f
 	c.Next()
 	return c.err
 }
@@ -175,32 +175,32 @@ func (ip *Pool[T]) rebuildHandlers(handlerFunc ...HandlerFunc[T]) {
 	ip.getHandlers = make([]HandlerFunc[T], len(ip.handlers)+1)
 	copy(ip.getHandlers, ip.handlers)
 	ip.getHandlers[len(ip.handlers)] = func(c *Context[T]) {
-		c.idx, c.err = ip.get()
+		c.slotIndex, c.err = ip.get()
 	}
 
 	ip.putHandlers = make([]HandlerFunc[T], len(ip.handlers)+1)
 	copy(ip.putHandlers, ip.handlers)
 	ip.putHandlers[len(ip.handlers)] = func(c *Context[T]) {
-		c.err = ip.put(c.idx)
+		c.err = ip.put(c.slotIndex)
 	}
 
 	ip.accessHandlers = make([]HandlerFunc[T], len(ip.handlers)+1)
 	copy(ip.accessHandlers, ip.handlers)
 	ip.accessHandlers[len(ip.handlers)] = func(c *Context[T]) {
-		c.err = ip.access(c.idx, c.fn)
+		c.err = ip.access(c.slotIndex, c.fn)
 		// 동기화가 필요하면 Sync 메서드 사용
-		// c.err = ip.accessSync(c.idx, c.fn)
+		// c.err = ip.accessSync(c.slotIndex, c.fn)
 	}
 }
 
 func (ip *Pool[T]) get() (int, error) {
 	select {
-	case idx := <-ip.q:
-		slot := &ip.slots[idx]
+	case slotIndex := <-ip.q:
+		slot := &ip.slots[slotIndex]
 		slot.mu.Lock()
 		slot.state = StateAlloc
 		slot.mu.Unlock()
-		return idx, nil
+		return slotIndex, nil
 	default:
 		return -1, ErrEmpty
 	}

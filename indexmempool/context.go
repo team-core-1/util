@@ -1,12 +1,12 @@
 package indexmempool
 
 type Context[T any] struct {
-	index    int
-	action   ActionType
-	handlers []HandlerFunc[T]
-	idx      int
-	fn       func(*T)
-	err      error
+	index     int
+	action    ActionType
+	handlers  []HandlerFunc[T]
+	slotIndex int
+	fn        func(*T)
+	err       error
 }
 
 func (c *Context[T]) Next() {
@@ -19,7 +19,7 @@ func (c *Context[T]) Next() {
 	}
 }
 
-func (c *Context[T]) Idx() int           { return c.idx }
+func (c *Context[T]) Index() int         { return c.slotIndex }
 func (c *Context[T]) Action() ActionType { return c.action }
 func (c *Context[T]) Err() error         { return c.err }
 
