@@ -65,7 +65,7 @@ func Init(cfg Config) error {
 	logCloser = logWriter
 	levelVar.Set(cfg.Level)
 
-	handler := NewHandler(logWriter, &handlerOptions{
+	handler := newHandler(logWriter, &handlerOptions{
 		Level:      levelVar,
 		TimeFormat: "2006-01-02T15:04:05.000",
 	})

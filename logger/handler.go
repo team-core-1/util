@@ -29,7 +29,7 @@ type customHandler struct {
 	mu         *sync.Mutex
 }
 
-func NewHandler(w io.Writer, opts *handlerOptions) *customHandler {
+func newHandler(w io.Writer, opts *handlerOptions) *customHandler {
 	if opts == nil {
 		opts = &handlerOptions{}
 	}
