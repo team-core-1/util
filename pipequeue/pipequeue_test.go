@@ -137,6 +137,7 @@ func TestQueue_ConcurrencyAndMemoryCleanup(t *testing.T) {
 	t.Logf("  - 실패 : %d 회", enqueueFailCount.Load())
 
 	// queue Close
+	q.Close()
 	q = nil
 	for i := 0; i < 1; i++ {
 		runtime.GC()
