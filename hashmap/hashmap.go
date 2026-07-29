@@ -85,20 +85,15 @@ func (hm *Map[K, V]) Put(key K, value V) error {
 		return ErrNil
 	}
 
-	hm.mu.Lock()
-	defer hm.mu.Unlock()
-
-	if hm.m == nil {
-		return ErrClosed
-	}
-
 	c := hm.pool.Get().(*Context[K, V])
 	defer func() {
 		c.reset()
 		hm.pool.Put(c)
 	}()
 
+	hm.mu.RLock()
 	c.handlers = hm.putHandlers
+	hm.mu.RUnlock()
 
 	c.index, c.action, c.key, c.value = -1, ActionPut, key, value
 	c.Next()
@@ -112,20 +107,15 @@ func (hm *Map[K, V]) Get(key K) (V, error) {
 		return zero, ErrNil
 	}
 
-	hm.mu.RLock()
-	defer hm.mu.RUnlock()
-
-	if hm.m == nil {
-		return zero, ErrClosed
-	}
-
 	c := hm.pool.Get().(*Context[K, V])
 	defer func() {
 		c.reset()
 		hm.pool.Put(c)
 	}()
 
+	hm.mu.RLock()
 	c.handlers = hm.getHandlers
+	hm.mu.RUnlock()
 
 	c.index, c.action, c.key = -1, ActionGet, key
 	c.Next()
@@ -137,20 +127,15 @@ func (hm *Map[K, V]) Delete(key K) {
 		return
 	}
 
-	hm.mu.Lock()
-	defer hm.mu.Unlock()
-
-	if hm.m == nil {
-		return
-	}
-
 	c := hm.pool.Get().(*Context[K, V])
 	defer func() {
 		c.reset()
 		hm.pool.Put(c)
 	}()
 
+	hm.mu.RLock()
 	c.handlers = hm.deleteHandlers
+	hm.mu.RUnlock()
 
 	c.index, c.action, c.key = -1, ActionDelete, key
 	c.Next()
@@ -283,10 +268,6 @@ func (hm *Map[K, V]) Use(handlerFunc ...HandlerFunc[K, V]) {
 	hm.mu.Lock()
 	defer hm.mu.Unlock()
 
-	if hm.m == nil {
-		return
-	}
-
 	hm.rebuildHandlers(handlerFunc...)
 }
 
@@ -343,6 +324,13 @@ func (hm *Map[K, V]) rebuildHandlers(handlerFunc ...HandlerFunc[K, V]) {
 }
 
 func (hm *Map[K, V]) put(key K, value V) error {
+	hm.mu.Lock()
+	defer hm.mu.Unlock()
+
+	if hm.m == nil {
+		return ErrClosed
+	}
+
 	if len(hm.m) >= hm.cap {
 		return ErrFull
 	}
@@ -359,6 +347,13 @@ func (hm *Map[K, V]) put(key K, value V) error {
 func (hm *Map[K, V]) get(key K) (V, error) {
 	var zero V
 
+	hm.mu.RLock()
+	defer hm.mu.RUnlock()
+
+	if hm.m == nil {
+		return zero, ErrClosed
+	}
+
 	if value, ok := hm.m[key]; ok {
 		return value, nil
 	}
@@ -367,5 +362,12 @@ func (hm *Map[K, V]) get(key K) (V, error) {
 }
 
 func (hm *Map[K, V]) delete(key K) {
+	hm.mu.Lock()
+	defer hm.mu.Unlock()
+
+	if hm.m == nil {
+		return
+	}
+
 	delete(hm.m, key)
 }

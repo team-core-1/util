@@ -147,6 +147,13 @@ func (ip *Pool[T]) Access(index int, f func(*T)) error {
 }
 
 func (ip *Pool[T]) Use(handlerFunc ...HandlerFunc[T]) {
+	if ip == nil {
+		return
+	}
+
+	ip.mu.Lock()
+	defer ip.mu.Unlock()
+
 	ip.rebuildHandlers(handlerFunc...)
 }
 
@@ -167,9 +174,6 @@ func (ip *Pool[T]) Cap() int {
 }
 
 func (ip *Pool[T]) rebuildHandlers(handlerFunc ...HandlerFunc[T]) {
-	ip.mu.Lock()
-	defer ip.mu.Unlock()
-
 	ip.handlers = append(ip.handlers, handlerFunc...)
 
 	ip.getHandlers = make([]HandlerFunc[T], len(ip.handlers)+1)

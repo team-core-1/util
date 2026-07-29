@@ -140,6 +140,9 @@ func (q *Queue[T]) Use(handlerFunc ...HandlerFunc[T]) {
 		return
 	}
 
+	q.mu.Lock()
+	defer q.mu.Unlock()
+
 	q.rebuildHandlers(handlerFunc...)
 }
 
@@ -191,9 +194,6 @@ func (q *Queue[T]) IsClosed() bool {
 }
 
 func (q *Queue[T]) rebuildHandlers(handlerFunc ...HandlerFunc[T]) {
-	q.mu.Lock()
-	defer q.mu.Unlock()
-
 	if q.isClosed {
 		return
 	}
