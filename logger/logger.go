@@ -6,6 +6,7 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"sync"
 
 	"gopkg.in/natefinch/lumberjack.v2"
 )
@@ -28,11 +29,15 @@ type Config struct {
 }
 
 var (
+	mu        sync.Mutex
 	levelVar  = new(slog.LevelVar)
 	logCloser io.Closer
 )
 
 func Init(cfg Config) error {
+	mu.Lock()
+	defer mu.Unlock()
+
 	if logCloser != nil {
 		_ = logCloser.Close()
 		logCloser = nil
@@ -111,6 +116,9 @@ func Init(cfg Config) error {
 //	    // 비즈니스 로직 실행
 //	}()
 func Close() error {
+	mu.Lock()
+	defer mu.Unlock()
+
 	if logCloser != nil {
 		err := logCloser.Close()
 		logCloser = nil
