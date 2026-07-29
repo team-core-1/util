@@ -33,6 +33,7 @@ const (
 	ActionGet ActionType = iota + 1
 	ActionPut
 	ActionAccess
+	ActionAccessLock
 )
 
 type HandlerFunc[T any] func(*Context[T])
@@ -48,11 +49,12 @@ type Pool[T any] struct {
 	q     chan int
 	slots []slot[T]
 
-	pool           sync.Pool
-	handlers       []HandlerFunc[T]
-	getHandlers    []HandlerFunc[T]
-	putHandlers    []HandlerFunc[T]
-	accessHandlers []HandlerFunc[T]
+	pool               sync.Pool
+	handlers           []HandlerFunc[T]
+	getHandlers        []HandlerFunc[T]
+	putHandlers        []HandlerFunc[T]
+	accessHandlers     []HandlerFunc[T]
+	accessLockHandlers []HandlerFunc[T]
 }
 
 func New[T any](capacity int) (*Pool[T], error) {
@@ -146,6 +148,34 @@ func (ip *Pool[T]) Access(index int, f func(*T)) error {
 	return c.err
 }
 
+func (ip *Pool[T]) AccessLock(index int, f func(*T)) error {
+	if ip == nil {
+		return ErrNil
+	}
+
+	if (index < 0) || (index >= len(ip.slots)) {
+		return ErrInvalidIndex
+	}
+
+	c := ip.pool.Get().(*Context[T])
+	defer func() {
+		c.reset()
+		ip.pool.Put(c)
+	}()
+
+	ip.mu.RLock()
+	c.handlers = ip.accessLockHandlers
+	ip.mu.RUnlock()
+
+	c.index, c.action, c.slotIndex, c.fn = -1, ActionAccessLock, index, f
+	c.Next()
+	return c.err
+}
+
+// Use는 Get/Put/Access/AccessLock 연산 전후에 실행할 미들웨어를 체인에 등록합니다.
+// 여러 번 호출하면 등록한 순서대로 체인에 누적되며, nil 핸들러는 실행 시 건너뜁니다.
+//
+// 미들웨어는 연산을 중단하거나 취소할 수 없습니다. 자세한 내용은 [Context.Next]를 참고하십시오.
 func (ip *Pool[T]) Use(handlerFunc ...HandlerFunc[T]) {
 	if ip == nil {
 		return
@@ -192,8 +222,12 @@ func (ip *Pool[T]) rebuildHandlers(handlerFunc ...HandlerFunc[T]) {
 	copy(ip.accessHandlers, ip.handlers)
 	ip.accessHandlers[len(ip.handlers)] = func(c *Context[T]) {
 		c.err = ip.access(c.slotIndex, c.fn)
-		// 동기화가 필요하면 Sync 메서드 사용
-		// c.err = ip.accessSync(c.slotIndex, c.fn)
+	}
+
+	ip.accessLockHandlers = make([]HandlerFunc[T], len(ip.handlers)+1)
+	copy(ip.accessLockHandlers, ip.handlers)
+	ip.accessLockHandlers[len(ip.handlers)] = func(c *Context[T]) {
+		c.err = ip.accessLock(c.slotIndex, c.fn)
 	}
 }
 
@@ -260,24 +294,26 @@ func (ip *Pool[T]) access(index int, fn func(*T)) error {
 	return nil
 }
 
-func (ip *Pool[T]) accessSync(index int, fn func(*T)) error {
+func (ip *Pool[T]) accessLock(index int, fn func(*T)) error {
 	slot := &ip.slots[index]
 
 	slot.mu.Lock()
-	// f(&slot.mem)에서 panic 발생 시 복구
-	defer func() {
-		slot.state &^= StateInUse
-		slot.mu.Unlock()
-	}()
+	defer slot.mu.Unlock()
 
 	if (slot.state & StateAlloc) != StateAlloc {
 		return ErrNotAllocIndex
 	}
 	if (slot.state & StateInUse) == StateInUse {
-		// 발생할 수 없는 에러
+		// Access()가 락을 놓고 콜백 실행 중인 경우 도달.
+		// 이 시점에는 StateInUse의 소유자가 Access()이므로 절대 해제하면 안 됨.
 		return ErrInuseIndex
 	}
 	slot.state |= StateInUse
+
+	// f(&slot.mem)에서 panic 발생 시, 이 함수가 세운 StateInUse만 복구
+	defer func() {
+		slot.state &^= StateInUse
+	}()
 
 	fn(&slot.mem)
 

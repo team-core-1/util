@@ -260,6 +260,10 @@ func (hm *Map[K, V]) DoAll(fn func(K, V) (int, error)) (int, error) {
 	return sum, nil
 }
 
+// Use는 Put/Get/Delete 연산 전후에 실행할 미들웨어를 체인에 등록합니다.
+// 여러 번 호출하면 등록한 순서대로 체인에 누적되며, nil 핸들러는 실행 시 건너뜁니다.
+//
+// 미들웨어는 연산을 중단하거나 취소할 수 없습니다. 자세한 내용은 [Context.Next]를 참고하십시오.
 func (hm *Map[K, V]) Use(handlerFunc ...HandlerFunc[K, V]) {
 	if hm == nil {
 		return

@@ -75,16 +75,16 @@ func TestQueue_ConcurrencyAndMemoryCleanup(t *testing.T) {
 
 	startSignal := make(chan any)
 
-	// 1. 멀티 고루틴에서 Dequeue/Enqueue 시험
+	// 1. 멀티 고루틴에서 C() 수신/Put 시험
 	for i := 0; i < goroutineCount; i++ {
-		// Dequeue/Enqueue 경합 고루틴
+		// C() 수신/Put 경합 고루틴
 		wg.Add(1)
 		go func(id int) {
 			defer wg.Done()
 			<-startSignal
 
 			for j := 0; j < loopCount; j++ {
-				// Dequeue 시험
+				// C() 수신 시험
 				select {
 				case _, ok := <-q.C():
 					if !ok {
@@ -104,8 +104,8 @@ func TestQueue_ConcurrencyAndMemoryCleanup(t *testing.T) {
 			<-startSignal
 
 			for j := 0; j < loopCount; j++ {
-				// Enqueue 시험
-				err := q.Enqueue(data)
+				// Put 시험
+				err := q.Put(data)
 				if err != nil {
 					enqueueFailCount.Add(1)
 					continue
@@ -117,7 +117,7 @@ func TestQueue_ConcurrencyAndMemoryCleanup(t *testing.T) {
 
 	t.Logf("==================================================")
 	t.Logf(" [시험 목적 및 조건]")
-	t.Logf("  - 시험 목적 : 멀티 고루틴 Enqueue/Dequeue 경합 및 메모리 정리 테스트")
+	t.Logf("  - 시험 목적 : 멀티 고루틴 Put/C() 수신 경합 및 메모리 정리 테스트")
 	t.Logf("  - 시험 조건 : Capacity:%d, 고루틴:%d개, 반복:%d회", capacity, goroutineCount*2, loopCount)
 	t.Logf("--------------------------------------------------")
 	t.Logf(" => 시험 진행 중...")
@@ -128,11 +128,11 @@ func TestQueue_ConcurrencyAndMemoryCleanup(t *testing.T) {
 	t.Logf("==================================================")
 	t.Logf(" [테스트 수치]")
 	t.Logf("--------------------------------------------------")
-	t.Logf(" 총 Dequeue 시도 : %d 회", goroutineCount*loopCount)
+	t.Logf(" 총 C() 수신 시도 : %d 회", goroutineCount*loopCount)
 	t.Logf("  - 성공 : %d 회", dequeueSuccCount.Load())
 	t.Logf("  - 실패 : %d 회", dequeueFailCount.Load())
 	t.Logf("--------------------------------------------------")
-	t.Logf(" 총 Enqueue 시도 : %d 회", goroutineCount*loopCount)
+	t.Logf(" 총 Put 시도 : %d 회", goroutineCount*loopCount)
 	t.Logf("  - 성공 : %d 회", enqueueSuccCount.Load())
 	t.Logf("  - 실패 : %d 회", enqueueFailCount.Load())
 
@@ -167,7 +167,7 @@ func TestQueue_ConcurrencyAndMemoryCleanup(t *testing.T) {
 	record(t, fmt.Sprintf("Succ(Enq:%d, Deq:%d), Mem:%.2fMB->%.2fMB", enqueueSuccCount.Load(), dequeueSuccCount.Load(), float64(msBefore.Alloc)/1024/1024, float64(msClose.Alloc)/1024/1024))
 }
 
-// 1. 100개의 큐를 생성하여 Enqueue한 값이 그대로 Dequeue되는지 확인하는 테스트
+// 1. 100개의 큐를 생성하여 Put한 값이 그대로 C()로 수신되는지 확인하는 테스트
 func TestQueue_IntegrityCheck100(t *testing.T) {
 	const count = 100
 	t.Logf("==================================================")
@@ -182,13 +182,13 @@ func TestQueue_IntegrityCheck100(t *testing.T) {
 		}
 
 		expected := i + 5000
-		if err := q.Enqueue(expected); err != nil {
-			t.Errorf("[%d] Enqueue 실패: %v", i, err)
+		if err := q.Put(expected); err != nil {
+			t.Errorf("[%d] Put 실패: %v", i, err)
 		}
 
 		actual, ok := <-q.C()
 		if !ok {
-			t.Errorf("[%d] Dequeue 실패: channel closed", i)
+			t.Errorf("[%d] C() 수신 실패: channel closed", i)
 		}
 
 		if expected != actual {
@@ -197,13 +197,13 @@ func TestQueue_IntegrityCheck100(t *testing.T) {
 	}
 	t.Logf("--------------------------------------------------")
 	t.Logf(" [테스트 수치]")
-	t.Logf("  - 총 %d개 큐 생성 및 Enqueue/Dequeue 정합성 검증 완료", count)
+	t.Logf("  - 총 %d개 큐 생성 및 Put/C() 수신 정합성 검증 완료", count)
 	t.Logf(" [시험 결과] : 정상 (모든 데이터 일치)")
 	t.Logf("==================================================")
 	record(t, fmt.Sprintf("Verified %d independent queue instances", count))
 }
 
-// 2. Use 메서드를 이용한 Enqueue/Dequeue 실행 시간 측정 테스트
+// 2. Use 메서드를 이용한 Put 실행 시간 측정 테스트
 func TestQueue_ExecutionTimeMeasurement(t *testing.T) {
 	const goroutineCount = 50
 	const loopCount = 100
@@ -215,7 +215,7 @@ func TestQueue_ExecutionTimeMeasurement(t *testing.T) {
 	// 미들웨어를 이용한 시간 측정 로직 등록
 	q.Use(func(c *Context[int]) {
 		start := time.Now()
-		c.Next() // 실제 작업(Enqueue/Dequeue) 수행
+		c.Next() // 실제 작업(Put) 수행
 		elapsed := time.Since(start)
 
 		totalDuration.Add(int64(elapsed))
@@ -224,7 +224,7 @@ func TestQueue_ExecutionTimeMeasurement(t *testing.T) {
 
 	t.Logf("==================================================")
 	t.Logf(" [시험 목적 및 조건]")
-	t.Logf("  - 시험 목적 : 미들웨어를 이용한 Enqueue/Dequeue 실행 시간 측정 테스트")
+	t.Logf("  - 시험 목적 : 미들웨어를 이용한 Put 실행 시간 측정 테스트")
 	t.Logf("  - 시험 조건 : 총 고루틴: %d개, 반복: %d회", goroutineCount*2, loopCount)
 
 	var wg sync.WaitGroup
@@ -236,7 +236,7 @@ func TestQueue_ExecutionTimeMeasurement(t *testing.T) {
 			defer wg.Done()
 			<-startSignal
 			for j := 0; j < loopCount; j++ {
-				_ = q.Enqueue(j)
+				_ = q.Put(j)
 			}
 		}()
 		go func() {
@@ -287,14 +287,14 @@ func TestQueue_ConcurrentClose(t *testing.T) {
 	var dequeueEmptyCount atomic.Uint64
 	var dequeueClosedCount atomic.Uint64
 
-	// Enqueue/Dequeue를 수행하는 여러 고루틴 생성
+	// Put/C() 수신을 수행하는 여러 고루틴 생성
 	for i := 0; i < goroutineCount; i++ {
 		wg.Add(2)
 		go func() {
 			defer wg.Done()
 			<-startSignal
 			for j := 0; j < loopCount; j++ {
-				err := q.Enqueue(j)
+				err := q.Put(j)
 				if err == nil {
 					enqueueSuccCount.Add(1)
 				} else if err == ErrClosed {
@@ -337,10 +337,10 @@ func TestQueue_ConcurrentClose(t *testing.T) {
 	t.Logf("--------------------------------------------------")
 	t.Logf(" 시험 조건:")
 	t.Logf("  - Capacity       : %d", capacity)
-	t.Logf("  - 총 고루틴 개수 : %d (Enqueue:%d, Dequeue:%d)", goroutineCount*2, goroutineCount, goroutineCount)
+	t.Logf("  - 총 고루틴 개수 : %d (Put:%d, C()수신:%d)", goroutineCount*2, goroutineCount, goroutineCount)
 	t.Logf("  - 고루틴당 반복  : %d 회", loopCount)
 	t.Logf("--------------------------------------------------")
-	t.Logf(" Enqueue 통계:")
+	t.Logf(" Put 통계:")
 	t.Logf("  - 총 시도 횟수   : %d 회", goroutineCount*loopCount)
 	t.Logf("  - 성공 횟수      : %d 회", enqueueSuccCount.Load())
 	t.Logf("  - ErrFull 감지   : %d 회", enqueueFullCount.Load())
@@ -349,10 +349,10 @@ func TestQueue_ConcurrentClose(t *testing.T) {
 	t.Logf("  - 총 실패 횟수   : %d 회 (Full + Closed)", enqueueTotalFail)
 	t.Logf("  - 합계(성공+실패): %d 회", enqueueSuccCount.Load()+enqueueTotalFail)
 
-	t.Logf(" Dequeue 통계:")
+	t.Logf(" C() 수신 통계:")
 	t.Logf("  - 총 시도 횟수   : %d 회", goroutineCount*loopCount)
 	t.Logf("  - 성공 횟수      : %d 회", dequeueSuccCount.Load())
-	t.Logf("  - ErrEmpty 감지  : %d 회", dequeueEmptyCount.Load())
+	t.Logf("  - 비어있음 감지 : %d 회", dequeueEmptyCount.Load())
 	t.Logf("  - ErrClosed 감지 : %d 회", dequeueClosedCount.Load())
 	dequeueTotalFail := dequeueEmptyCount.Load() + dequeueClosedCount.Load()
 	t.Logf("  - 총 실패 횟수   : %d 회 (Empty + Closed)", dequeueTotalFail)

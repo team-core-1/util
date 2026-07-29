@@ -149,10 +149,17 @@ func (engine *Engine[T]) C() <-chan T {
 	return engine.pq.C()
 }
 
+// Use는 Set/Cancel/Timeout 연산 전후에 실행할 미들웨어를 체인에 등록합니다.
+// 여러 번 호출하면 등록한 순서대로 체인에 누적되며, nil 핸들러는 실행 시 건너뜁니다.
+//
+// 미들웨어는 연산을 중단하거나 취소할 수 없습니다. 자세한 내용은 [Context.Next]를 참고하십시오.
 func (engine *Engine[T]) Use(handlerFunc ...HandlerFunc[T]) {
 	if engine == nil {
 		return
 	}
+
+	engine.mu.Lock()
+	defer engine.mu.Unlock()
 
 	engine.rebuildHandlers(handlerFunc...)
 }
@@ -199,9 +206,6 @@ func (engine *Engine[T]) QFail() int {
 }
 
 func (engine *Engine[T]) rebuildHandlers(handlerFunc ...HandlerFunc[T]) {
-	engine.mu.Lock()
-	defer engine.mu.Unlock()
-
 	engine.handlers = append(engine.handlers, handlerFunc...)
 
 	// Middleware + settimer handlers
@@ -305,7 +309,7 @@ func (engine *Engine[T]) cancelTimer(timer *Timer) error {
 }
 
 func (engine *Engine[T]) timeout(key T) error {
-	if err := engine.pq.Enqueue(key); err != nil {
+	if err := engine.pq.Put(key); err != nil {
 		engine.qFail.Add(1)
 		return ErrExpiredQueueFail
 	}
