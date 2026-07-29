@@ -19,9 +19,9 @@ const (
 	ErrInvalidCap       = ErrorType("timer: invalid capacity")
 	ErrNil              = ErrorType("timer: nil")
 	ErrClosed           = ErrorType("timer: closed")
-	ErrExpiredQFull     = ErrorType("timer: expired queue full")
+	ErrExpiredQueueFull = ErrorType("timer: expired queue full")
 	ErrAlreadyCancelled = ErrorType("timer: already cancelled timer")
-	ErrExpiredQFail     = ErrorType("timer: expired queue fail")
+	ErrExpiredQueueFail = ErrorType("timer: expired queue fail")
 )
 
 type ActionType int
@@ -238,7 +238,7 @@ func (engine *Engine[T]) setTimer(d time.Duration, key T) (*Timer, error) {
 	for {
 		active := engine.active.Load()
 		if (int(active) + engine.pq.Len()) >= engine.cap {
-			return nil, ErrExpiredQFull
+			return nil, ErrExpiredQueueFull
 		}
 		if engine.active.CompareAndSwap(active, active+1) {
 			break
@@ -307,7 +307,7 @@ func (engine *Engine[T]) cancelTimer(timer *Timer) error {
 func (engine *Engine[T]) timeout(key T) error {
 	if err := engine.pq.Enqueue(key); err != nil {
 		engine.qFail.Add(1)
-		return ErrExpiredQFail
+		return ErrExpiredQueueFail
 	}
 
 	return nil

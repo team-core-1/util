@@ -164,7 +164,7 @@ func TestTimer_Integrity(t *testing.T) {
 				setSucc.Add(1)
 				timers[id] = tm
 				keys[id] = key
-			} else if err == ErrExpiredQFull {
+			} else if err == ErrExpiredQueueFull {
 				setFull.Add(1)
 			}
 		}(i)
@@ -253,7 +253,7 @@ func TestTimer_StressCap1(t *testing.T) {
 						engine.Cancel(tm)
 						cancelSucc.Add(1)
 					}
-				} else if err == ErrExpiredQFull {
+				} else if err == ErrExpiredQueueFull {
 					setFull.Add(1)
 				}
 			}

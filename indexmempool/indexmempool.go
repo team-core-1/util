@@ -14,7 +14,7 @@ const (
 	ErrInvalidCap    = ErrorType("indexmempool: invalid capacity")
 	ErrNil           = ErrorType("indexmempool: pool is nil")
 	ErrEmpty         = ErrorType("indexmempool: pool is empty")
-	ErrWrongIndex    = ErrorType("indexmempool: wrong index")
+	ErrInvalidIndex  = ErrorType("indexmempool: invalid index")
 	ErrNotAllocIndex = ErrorType("indexmempool: not alloc index")
 	ErrInuseIndex    = ErrorType("indexmempool: inuse index")
 )
@@ -104,7 +104,7 @@ func (ip *Pool[T]) Put(index int) error {
 	}
 
 	if (index < 0) || (index >= len(ip.slots)) {
-		return ErrWrongIndex
+		return ErrInvalidIndex
 	}
 
 	c := ip.pool.Get().(*Context[T])
@@ -128,7 +128,7 @@ func (ip *Pool[T]) Access(index int, f func(*T)) error {
 	}
 
 	if (index < 0) || (index >= len(ip.slots)) {
-		return ErrWrongIndex
+		return ErrInvalidIndex
 	}
 
 	c := ip.pool.Get().(*Context[T])

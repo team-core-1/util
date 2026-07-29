@@ -108,8 +108,8 @@ func TestPool_Errors(t *testing.T) {
 
 	// Put wrong index should fail
 	err = ip.Put(99)
-	if err != ErrWrongIndex {
-		t.Errorf("expected ErrWrongIndex, got %v", err)
+	if err != ErrInvalidIndex {
+		t.Errorf("expected ErrInvalidIndex, got %v", err)
 	}
 
 	// Put free index should fail (double free)
@@ -125,7 +125,7 @@ func TestPool_Errors(t *testing.T) {
 	t.Logf(" [테스트 수치]")
 	t.Logf("--------------------------------------------------")
 	t.Logf("  - 에러 처리 시도 횟수 : 5회")
-	t.Logf("  - 감지된 에러 형태   : ErrNotAllocIndex, ErrEmpty, ErrWrongIndex")
+	t.Logf("  - 감지된 에러 형태   : ErrNotAllocIndex, ErrEmpty, ErrInvalidIndex")
 	t.Logf("==================================================")
 	t.Logf(" [시험 결과] : 정상 (모든 에러 상황 차단 확인)")
 	t.Logf("==================================================")
