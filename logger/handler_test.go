@@ -140,3 +140,114 @@ func TestHandler_SlogConformance(t *testing.T) {
 	t.Logf(" [시험 결과] : 정상 (표준 적합성 검사 통과)")
 	t.Logf("==================================================")
 }
+
+// TestHandler_Quoting은 구분자나 제어 문자가 포함된 값/키/메시지가
+// 로그 한 줄의 구조를 깨뜨리지 않도록 인용되는지 검증합니다.
+//
+// 특히 줄바꿈이 그대로 출력되면 로그 1건이 여러 줄로 쪼개져,
+// 줄 단위 로그 수집기가 가짜 레코드를 정상 레코드로 인식하게 됩니다(로그 위조).
+func TestHandler_Quoting(t *testing.T) {
+	// 가짜 로그 레코드를 주입하려는 입력
+	forged := "normal\n2026-01-01T00:00:00.000 [ERROR] granted user=attacker"
+
+	cases := []struct {
+		name string
+		log  func(l *slog.Logger)
+		want string // 메시지 이후에 기대되는 문자열
+	}{
+		{
+			name: "값에 줄바꿈",
+			log:  func(l *slog.Logger) { l.Info("m", "input", forged) },
+			want: `input="normal\n2026-01-01T00:00:00.000 [ERROR] granted user=attacker"`,
+		},
+		{
+			name: "값에 공백",
+			log:  func(l *slog.Logger) { l.Info("m", "note", "hello world") },
+			want: `note="hello world"`,
+		},
+		{
+			name: "값에 등호",
+			log:  func(l *slog.Logger) { l.Info("m", "expr", "a=b") },
+			want: `expr="a=b"`,
+		},
+		{
+			name: "값에 인용부호",
+			log:  func(l *slog.Logger) { l.Info("m", "q", `he said "hi"`) },
+			want: `q="he said \"hi\""`,
+		},
+		{
+			name: "빈 값",
+			log:  func(l *slog.Logger) { l.Info("m", "empty", "") },
+			want: `empty=""`,
+		},
+		{
+			name: "키에 공백",
+			log:  func(l *slog.Logger) { l.Info("m", "my key", "v") },
+			want: `"my key"=v`,
+		},
+		{
+			name: "그룹명에 공백",
+			log:  func(l *slog.Logger) { l.WithGroup("g p").Info("m", "k", "v") },
+			want: `"g p.k"=v`,
+		},
+		{
+			name: "인용이 불필요한 정상 값",
+			log:  func(l *slog.Logger) { l.Info("m", "user", "alice", "count", 3) },
+			want: `user=alice count=3`,
+		},
+	}
+
+	t.Logf("==================================================")
+	t.Logf(" [시험 목적 및 조건]")
+	t.Logf("  - 시험 목적 : 구분자/제어 문자 포함 시 인용 처리 및 로그 위조 차단 검증")
+	t.Logf("  - 시험 조건 : 값/키/그룹명 경로별 %d개 케이스", len(cases))
+	t.Logf("--------------------------------------------------")
+
+	for _, c := range cases {
+		var buf bytes.Buffer
+		l := slog.New(newHandler(&buf, &handlerOptions{Level: slog.LevelDebug}))
+		c.log(l)
+
+		out := strings.TrimSuffix(buf.String(), "\n")
+
+		// 어떤 입력이든 로그는 항상 한 줄이어야 함
+		if strings.Contains(out, "\n") {
+			t.Errorf("%s: 로그가 여러 줄로 분리됨 (로그 위조 가능)\n%s", c.name, out)
+			continue
+		}
+
+		idx := strings.Index(out, "] ")
+		if idx < 0 {
+			t.Errorf("%s: 예상치 못한 출력 형식: %q", c.name, out)
+			continue
+		}
+		got := out[idx+2:]
+
+		if !strings.HasSuffix(got, c.want) {
+			t.Errorf("%s: 인용 결과 불일치\n  기대(접미사): %s\n  실제        : %s", c.name, c.want, got)
+			continue
+		}
+		t.Logf("  - %-22s : %s", c.name, got)
+	}
+
+	// 메시지 경로도 줄 구조를 깨뜨리지 않아야 함
+	var buf bytes.Buffer
+	l := slog.New(newHandler(&buf, &handlerOptions{Level: slog.LevelDebug}))
+	l.Info(forged)
+	if strings.Contains(strings.TrimSuffix(buf.String(), "\n"), "\n") {
+		t.Errorf("메시지에 줄바꿈: 로그가 여러 줄로 분리됨 (로그 위조 가능)\n%s", buf.String())
+	} else {
+		t.Logf("  - %-22s : %s", "메시지에 줄바꿈", strings.TrimSuffix(buf.String(), "\n"))
+	}
+
+	// 메시지의 공백은 가독성을 위해 인용하지 않아야 함
+	buf.Reset()
+	l = slog.New(newHandler(&buf, &handlerOptions{Level: slog.LevelDebug}))
+	l.Info("hello world")
+	if !strings.Contains(buf.String(), "] hello world") {
+		t.Errorf("공백만 있는 메시지가 불필요하게 인용됨: %q", buf.String())
+	}
+
+	t.Logf(" [시험 결과] : 정상 (모든 주입 경로에서 단일 줄 유지)")
+	t.Logf("==================================================")
+}

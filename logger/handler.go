@@ -5,7 +5,10 @@ import (
 	"context"
 	"io"
 	"log/slog"
+	"strconv"
 	"sync"
+	"unicode"
+	"unicode/utf8"
 )
 
 var bufPool = sync.Pool{
@@ -85,7 +88,9 @@ func (h *customHandler) Handle(_ context.Context, r slog.Record) error {
 	buf.WriteString("] ")
 
 	// 3. Message
-	buf.WriteString(r.Message)
+	// 메시지는 위치 기반 필드라 공백은 그대로 두고,
+	// 줄바꿈 등 한 줄 구조를 깨뜨리는 문자가 있을 때만 인용합니다.
+	appendString(buf, r.Message, breaksLine(r.Message))
 
 	// 4. WithAttrs: 각 속성은 등록 시점의 그룹 접두사를 사용
 	for _, pa := range h.attrs {
@@ -133,6 +138,69 @@ func (h *customHandler) WithGroup(name string) slog.Handler {
 	return &h2
 }
 
+// needsQuoting은 문자열이 "key=value" 구조를 깨뜨릴 수 있는지 판단합니다.
+// 공백, '=', '"', 역슬래시, 제어 문자, 잘못된 UTF-8이 포함되면 인용이 필요합니다.
+func needsQuoting(s string) bool {
+	if s == "" {
+		return true
+	}
+
+	for i := 0; i < len(s); {
+		b := s[i]
+		if b < utf8.RuneSelf {
+			if b == ' ' || b == '=' || b == '"' || b == '\\' || b < 0x20 || b == 0x7f {
+				return true
+			}
+			i++
+			continue
+		}
+
+		r, size := utf8.DecodeRuneInString(s[i:])
+		if r == utf8.RuneError || unicode.IsSpace(r) || !unicode.IsPrint(r) {
+			return true
+		}
+		i += size
+	}
+
+	return false
+}
+
+// breaksLine은 문자열이 로그 한 줄의 구조를 깨뜨리는지 판단합니다.
+// 메시지는 키가 없는 위치 기반 필드라 공백을 허용하므로,
+// 줄바꿈 등 제어 문자와 잘못된 UTF-8만 검사합니다.
+func breaksLine(s string) bool {
+	for i := 0; i < len(s); {
+		b := s[i]
+		if b < utf8.RuneSelf {
+			if b < 0x20 || b == 0x7f {
+				return true
+			}
+			i++
+			continue
+		}
+
+		r, size := utf8.DecodeRuneInString(s[i:])
+		if r == utf8.RuneError || !unicode.IsPrint(r) {
+			return true
+		}
+		i += size
+	}
+
+	return false
+}
+
+// appendString은 quote가 참이면 이스케이프하여 인용부호로 감싸 기록합니다.
+func appendString(buf *bytes.Buffer, s string, quote bool) {
+	if !quote {
+		buf.WriteString(s)
+		return
+	}
+
+	b := buf.AvailableBuffer()
+	b = strconv.AppendQuote(b, s)
+	buf.Write(b)
+}
+
 func (h *customHandler) appendAttr(buf *bytes.Buffer, prefix string, attr slog.Attr) {
 	attr.Value = attr.Value.Resolve()
 	if attr.Equal(slog.Attr{}) {
@@ -156,8 +224,17 @@ func (h *customHandler) appendAttr(buf *bytes.Buffer, prefix string, attr slog.A
 	}
 
 	buf.WriteByte(' ')
-	buf.WriteString(prefix)
-	buf.WriteString(attr.Key)
+
+	// 키와 값 모두 구분자('=', 공백)나 제어 문자를 포함할 수 있으므로
+	// 필요 시 인용하여 한 줄의 구조가 깨지지 않도록 합니다.
+	key := attr.Key
+	if prefix != "" {
+		key = prefix + attr.Key
+	}
+	appendString(buf, key, needsQuoting(key))
+
 	buf.WriteByte('=')
-	buf.WriteString(attr.Value.String())
+
+	value := attr.Value.String()
+	appendString(buf, value, needsQuoting(value))
 }
