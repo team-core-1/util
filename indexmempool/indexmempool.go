@@ -80,6 +80,9 @@ func New[T any](capacity int) (*Pool[T], error) {
 	return ip, nil
 }
 
+// Get은 사용 가능한 슬롯 하나를 할당하고 그 인덱스를 반환합니다. (비블로킹)
+// 여유 슬롯이 없으면 대기하지 않고 즉시 ErrEmpty를 반환합니다.
+// 할당된 인덱스는 Access/AccessLock으로 접근하고, 사용이 끝나면 Put으로 반납하십시오.
 func (ip *Pool[T]) Get() (int, error) {
 	if ip == nil {
 		return -1, ErrNil
@@ -100,6 +103,13 @@ func (ip *Pool[T]) Get() (int, error) {
 	return c.slotIndex, c.err
 }
 
+// Put은 할당된 슬롯을 반납합니다. 슬롯의 메모리는 제로값으로 초기화된 뒤 재사용 대기열로 돌아갑니다.
+//   - 할당되지 않은 인덱스(중복 반납 포함)면 ErrNotAllocIndex를 반환합니다.
+//   - Access/AccessLock 콜백이 실행 중인 슬롯이면 ErrInuseIndex를 반환하며 반납되지 않습니다.
+//   - 범위를 벗어난 인덱스면 ErrInvalidIndex를 반환합니다.
+//
+// 반납 이후 해당 인덱스는 다른 사용자에게 재할당될 수 있으므로,
+// 이전에 얻은 메모리 포인터를 계속 사용해서는 안 됩니다.
 func (ip *Pool[T]) Put(index int) error {
 	if ip == nil {
 		return ErrNil
@@ -124,6 +134,26 @@ func (ip *Pool[T]) Put(index int) error {
 	return c.err
 }
 
+// Access는 할당된 슬롯의 메모리 포인터를 콜백 f에 전달합니다. (비블로킹 방식)
+//
+// 콜백 실행 전에 슬롯 락을 해제하고 사용 중 표시(StateInUse)만 남기므로,
+// 콜백이 오래 걸려도 다른 슬롯의 연산을 막지 않습니다.
+// 대신 같은 슬롯에 대한 중복 접근은 대기하지 않고 즉시 ErrInuseIndex로 거부됩니다.
+//
+// [AccessLock과의 차이 - 같은 인덱스에 동시 접근 시]
+//
+//	Access 실행 중  -> Access      : ErrInuseIndex 즉시 반환 (대기하지 않음)
+//	Access 실행 중  -> AccessLock  : ErrInuseIndex 즉시 반환 (대기하지 않음)
+//	AccessLock 실행 중 -> Access   : 슬롯 락에서 대기 후 실행
+//
+// 즉 Access는 "실패를 즉시 알고 재시도"하는 용도이고,
+// AccessLock은 "순서를 기다려서라도 반드시 실행"하는 용도입니다.
+//
+// [주의사항]
+//   - 콜백 f는 슬롯 락을 잡지 않은 상태로 실행됩니다.
+//     f에 전달된 포인터를 콜백 밖으로 반출하지 마십시오. Put 이후 다른 사용자에게 재할당됩니다.
+//   - 콜백에서 panic이 발생해도 StateInUse는 복구되지만, panic 자체는 호출 측으로 전파됩니다.
+//   - 할당되지 않은 슬롯이면 ErrNotAllocIndex, 범위를 벗어난 인덱스면 ErrInvalidIndex를 반환합니다.
 func (ip *Pool[T]) Access(index int, f func(*T)) error {
 	if ip == nil {
 		return ErrNil
@@ -148,6 +178,28 @@ func (ip *Pool[T]) Access(index int, f func(*T)) error {
 	return c.err
 }
 
+// AccessLock은 할당된 슬롯의 메모리 포인터를 콜백 f에 전달합니다. (블로킹 방식)
+//
+// Access와 달리 콜백 실행 구간 전체에서 슬롯 락을 유지하므로,
+// 같은 슬롯에 대한 다른 AccessLock/Access 호출은 거부되지 않고 순서를 기다려 직렬 실행됩니다.
+// 콜백 안에서 읽고-수정하는 연산의 원자성이 필요할 때 사용하십시오.
+//
+// [Access와의 차이 - 같은 인덱스에 동시 접근 시]
+//
+//	AccessLock 실행 중 -> AccessLock : 슬롯 락에서 대기 후 실행
+//	AccessLock 실행 중 -> Access     : 슬롯 락에서 대기 후 실행
+//	Access 실행 중     -> AccessLock : ErrInuseIndex 즉시 반환
+//	  (Access는 락을 놓고 콜백을 실행하므로 락 획득에는 성공하지만,
+//	   사용 중 표시가 남아 있어 소유자를 침범하지 않고 거부합니다.)
+//
+// [주의사항]
+//   - 콜백이 길어지면 같은 슬롯에 접근하려는 다른 고루틴이 그만큼 대기합니다.
+//     I/O 대기 등 오래 걸리는 작업은 콜백 밖에서 처리하십시오.
+//   - 콜백 f 안에서 같은 인덱스에 대해 Access/AccessLock/Put을 호출하면
+//     이미 자신이 슬롯 락을 쥐고 있으므로 자기 데드락에 빠집니다.
+//   - f에 전달된 포인터를 콜백 밖으로 반출하지 마십시오. Put 이후 다른 사용자에게 재할당됩니다.
+//   - 콜백에서 panic이 발생해도 슬롯 락과 StateInUse는 복구되지만, panic 자체는 호출 측으로 전파됩니다.
+//   - 할당되지 않은 슬롯이면 ErrNotAllocIndex, 범위를 벗어난 인덱스면 ErrInvalidIndex를 반환합니다.
 func (ip *Pool[T]) AccessLock(index int, f func(*T)) error {
 	if ip == nil {
 		return ErrNil
@@ -187,6 +239,9 @@ func (ip *Pool[T]) Use(handlerFunc ...HandlerFunc[T]) {
 	ip.rebuildHandlers(handlerFunc...)
 }
 
+// Len은 현재 할당 가능한(사용 중이 아닌) 슬롯 개수를 반환합니다.
+// 저장된 개수가 아니라 "남은 여유 개수"입니다.
+// 사용 중인 슬롯 수가 필요하면 Cap() - Len()으로 계산하십시오.
 func (ip *Pool[T]) Len() int {
 	if ip == nil {
 		return 0
@@ -195,6 +250,7 @@ func (ip *Pool[T]) Len() int {
 	return len(ip.q)
 }
 
+// Cap은 풀 생성 시 지정한 전체 슬롯 개수를 반환합니다.
 func (ip *Pool[T]) Cap() int {
 	if ip == nil {
 		return 0

@@ -18,6 +18,12 @@ type Context[T any] struct {
 //     (Next 호출 여부는 "감싸는 위치"만 결정할 뿐, 실행 여부를 결정하지 않습니다.)
 //   - 미들웨어는 로깅, 실행 시간 측정, 통계 수집 등 부수 작업 용도로 사용하십시오.
 //     연산 자체를 거부해야 한다면 미들웨어가 아니라 호출 측에서 사전 검사하십시오.
+//
+// [패닉 처리]
+// 모든 단계(Get/Put/Access/AccessLock)의 미들웨어는 해당 메서드를 호출한 고루틴에서 실행됩니다.
+// 미들웨어에서 발생한 panic은 호출 측으로 전파되므로 호출 측에서 recover할 수 있습니다.
+// 라이브러리 내부에는 recover 지점이 없습니다.
+// (단, 슬롯의 StateInUse 표시와 슬롯 락은 panic 시에도 정상 복구됩니다.)
 func (c *Context[T]) Next() {
 	c.index++
 	for c.index < len(c.handlers) {

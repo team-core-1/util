@@ -23,6 +23,18 @@ type Context[T any] struct {
 //     (Next 호출 여부는 "감싸는 위치"만 결정할 뿐, 실행 여부를 결정하지 않습니다.)
 //   - 미들웨어는 로깅, 실행 시간 측정, 통계 수집 등 부수 작업 용도로 사용하십시오.
 //     연산 자체를 거부해야 한다면 미들웨어가 아니라 호출 측에서 사전 검사하십시오.
+//
+// [패닉 처리: 실행 단계에 따라 결과가 다름]
+// Use로 등록한 미들웨어는 Set/Cancel/Timeout 체인에 모두 들어가며,
+// Timeout 단계만 다른 고루틴에서 실행됩니다.
+//   - Set/Cancel 단계는 Set/Cancel을 호출한 고루틴에서 실행됩니다.
+//     여기서 발생한 panic은 호출 측으로 전파되므로 호출 측에서 recover할 수 있습니다.
+//   - Timeout 단계(ActionTimeout)는 timingWheel의 만료 처리 고루틴에서 실행됩니다.
+//     이 고루틴에는 recover 지점이 없으므로 panic이 복구되지 않고 프로세스 전체를 종료시킵니다.
+//
+// 따라서 미들웨어는 panic이 발생하지 않도록 작성해야 합니다.
+// Action()으로 단계를 구분하지 않은 미들웨어는 모든 단계에서 실행되므로,
+// Set 단계에서 무해해 보이던 코드가 Timeout 단계에서는 프로세스를 내릴 수 있습니다.
 func (c *Context[T]) Next() {
 	c.index++
 	for c.index < len(c.handlers) {

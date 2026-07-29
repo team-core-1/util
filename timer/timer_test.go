@@ -318,7 +318,108 @@ func TestTimer_ConcurrentClose(t *testing.T) {
 	record(t, fmt.Sprintf("ClosedErrDetected:%d", closedErrCount.Load()))
 }
 
-// 5. 타이머 엔진 사용 후 메모리 누수 여부 확인
+// 5. 다른 엔진이 발급한 Timer는 Cancel할 수 없어야 함
+//
+// 소유권 검사가 없으면 취소를 요청한 엔진의 active가 부당하게 감소하여 음수가 되고,
+// 실제 소유 엔진은 카운터가 줄지 않아 용량을 영구히 잠식당한다.
+func TestTimer_CancelOwnership(t *testing.T) {
+	const capacity = 2
+
+	tw := timingwheel.NewTimingWheel(10*time.Millisecond, 20)
+	tw.Start()
+	defer tw.Stop()
+
+	engineA, _ := New[int](tw, capacity)
+	engineB, _ := New[int](tw, capacity)
+	defer engineA.Close()
+	defer engineB.Close()
+
+	t.Logf("==================================================")
+	t.Logf(" [시험 목적 및 조건]")
+	t.Logf("  - 시험 목적 : 타 엔진 발급 Timer의 Cancel 차단 및 용량 카운터 무결성 검증")
+	t.Logf("  - 시험 조건 : 동일 timingWheel을 공유하는 엔진 2개, Capacity:%d", capacity)
+	t.Logf("--------------------------------------------------")
+
+	// 만료되지 않도록 충분히 긴 시간으로 설정
+	tmB, err := engineB.Set(1*time.Hour, 100)
+	if err != nil {
+		t.Fatalf("B.Set 실패: %v", err)
+	}
+	if engineB.Len() != 1 {
+		t.Fatalf("B.Set 직후 Len: 1 기대, 실제 %d", engineB.Len())
+	}
+
+	// 1. A가 B의 타이머를 취소 시도 -> 거부되어야 함
+	if err := engineA.Cancel(tmB); err != ErrNotOwner {
+		t.Errorf("타 엔진 Timer Cancel: ErrNotOwner 기대, 실제 %v", err)
+	}
+
+	// 2. 거부된 요청이 A의 카운터를 훼손하지 않아야 함 (음수 방지)
+	if engineA.Len() != 0 {
+		t.Errorf("거부 후 A.Len: 0 기대, 실제 %d (카운터 훼손)", engineA.Len())
+	}
+
+	// 3. B의 타이머는 여전히 살아 있어야 함
+	if engineB.Len() != 1 {
+		t.Errorf("거부 후 B.Len: 1 기대, 실제 %d", engineB.Len())
+	}
+
+	// 4. 타입이 다른 엔진도 차단되어야 함
+	engineStr, _ := New[string](tw, capacity)
+	defer engineStr.Close()
+	if err := engineStr.Cancel(tmB); err != ErrNotOwner {
+		t.Errorf("타입이 다른 엔진 Cancel: ErrNotOwner 기대, 실제 %v", err)
+	}
+	if engineStr.Len() != 0 {
+		t.Errorf("거부 후 Engine[string].Len: 0 기대, 실제 %d", engineStr.Len())
+	}
+
+	// 5. 소유 엔진의 취소는 정상 동작하고 카운터가 회수되어야 함
+	if err := engineB.Cancel(tmB); err != nil {
+		t.Errorf("소유 엔진 Cancel: nil 기대, 실제 %v", err)
+	}
+	if engineB.Len() != 0 {
+		t.Errorf("정상 취소 후 B.Len: 0 기대, 실제 %d", engineB.Len())
+	}
+
+	// 6. 중복 취소는 기존대로 차단되어야 함
+	if err := engineB.Cancel(tmB); err != ErrAlreadyCancelled {
+		t.Errorf("중복 Cancel: ErrAlreadyCancelled 기대, 실제 %v", err)
+	}
+
+	// 7. 소유권 검사가 중복 취소 검사보다 먼저 수행되어야 함
+	//    (이미 취소된 타 엔진 타이머도 ErrAlreadyCancelled가 아니라 ErrNotOwner로 진단)
+	if err := engineA.Cancel(tmB); err != ErrNotOwner {
+		t.Errorf("이미 취소된 타 엔진 Timer Cancel: ErrNotOwner 기대, 실제 %v", err)
+	}
+
+	// 8. 엔진이 발급하지 않은 Timer도 소유권 검사에서 걸러져야 함
+	if err := engineA.Cancel(&Timer{}); err != ErrNotOwner {
+		t.Errorf("직접 생성한 Timer Cancel: ErrNotOwner 기대, 실제 %v", err)
+	}
+	if engineA.Len() != 0 {
+		t.Errorf("거부 후 A.Len: 0 기대, 실제 %d (카운터 훼손)", engineA.Len())
+	}
+
+	// 9. 취소로 반납된 용량을 다시 사용할 수 있어야 함 (용량 잠식 없음)
+	for i := 0; i < capacity; i++ {
+		if _, err := engineB.Set(1*time.Hour, i); err != nil {
+			t.Errorf("취소 후 재사용 B.Set #%d: nil 기대, 실제 %v (용량 잠식)", i, err)
+		}
+	}
+
+	t.Logf(" [테스트 수치]")
+	t.Logf("  - 타 엔진 Cancel 차단      : ErrNotOwner")
+	t.Logf("  - 차단 후 A.Len            : %d (음수 아님)", engineA.Len())
+	t.Logf("  - 정상 취소 후 재사용 가능 : B.Len=%d / Cap=%d", engineB.Len(), engineB.Cap())
+	t.Logf("--------------------------------------------------")
+	t.Logf(" [시험 결과] : 정상 (소유권 검사 및 카운터 무결성 확인)")
+	t.Logf("==================================================")
+
+	record(t, "Cancel ownership guard verified (cross-engine, cross-type, capacity reuse)")
+}
+
+// 6. 타이머 엔진 사용 후 메모리 누수 여부 확인
 func TestTimer_MemoryLeakCheck(t *testing.T) {
 	const capacity = 100
 	const iterations = 50

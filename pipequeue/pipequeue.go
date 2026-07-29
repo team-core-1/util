@@ -39,6 +39,12 @@ type Queue[T any] struct {
 	pipeHandlers []HandlerFunc[T]
 }
 
+// New는 지정한 용량의 PipeQueue를 생성하고 내부 pipe 고루틴을 시작합니다.
+//
+// [반드시 Close를 호출하십시오]
+// 내부 pipe 고루틴이 큐 자신을 참조하므로, Close 없이 큐 참조만 버리면
+// 고루틴이 계속 살아남아 큐와 버퍼에 담긴 데이터까지 GC 대상이 되지 않습니다.
+// 사용이 끝나면 반드시 Close를 호출하십시오.
 func New[T any](capacity int) (*Queue[T], error) {
 	if capacity <= 0 {
 		return nil, ErrInvalidCap
@@ -61,8 +67,20 @@ func New[T any](capacity int) (*Queue[T], error) {
 	return q, nil
 }
 
-// Close를 호출하면 PipeQueue 자원이 모두 해제되기 때문에
-// select case에서 사용하던 PipeQueue는 nil로 변경해야 함.
+// Close는 PipeQueue를 닫고 내부 pipe 고루틴을 종료시킵니다.
+// 여러 번 호출해도 안전하며, Close 이후의 Put은 ErrClosed를 반환합니다.
+// Close를 호출하면 자원이 모두 해제되므로, select case에서 사용하던 PipeQueue는 nil로 변경해야 합니다.
+//
+// [남아 있는 데이터는 폐기됩니다]
+// Close 시점에 큐에 남아 있던 데이터는 C()로 전달되지 않고 버려집니다.
+// Put이 nil(성공)을 반환했더라도 소비 이전에 Close되면 그 데이터는 유실됩니다.
+//
+// 이는 의도된 동작입니다. 남은 데이터를 끝까지 전달하려면 출력 채널을 비워 줄 수신자가 필요한데,
+// 종료 시점에 수신자가 이미 사라졌다면 pipe 고루틴이 송신 지점에서 영원히 대기하며 누수됩니다.
+// 종료가 지연되거나 고루틴이 남는 것보다 즉시 종료를 택했습니다.
+//
+// 잔여 데이터를 반드시 처리해야 한다면 Close 이전에 생산을 멈추고
+// C()를 통해 필요한 만큼 소비한 뒤 Close를 호출하십시오.
 func (q *Queue[T]) Close() {
 	if q == nil {
 		return
@@ -82,6 +100,11 @@ func (q *Queue[T]) Close() {
 	close(q.closeSig) // pipe 고루틴을 종료
 }
 
+// Put은 큐에 데이터를 투입합니다. 버퍼가 가득 차 있으면 대기하지 않고 즉시 ErrFull을 반환하며,
+// 닫힌 큐에는 ErrClosed를 반환합니다.
+//
+// nil 반환은 "큐에 투입 성공"을 의미할 뿐, C()로의 전달을 보장하지 않습니다.
+// 소비 이전에 Close가 호출되면 해당 데이터는 폐기됩니다. (자세한 내용은 Close 참고)
 func (q *Queue[T]) Put(data T) error {
 	if q == nil {
 		return ErrNil
@@ -122,7 +145,9 @@ func (q *Queue[T]) C() <-chan T {
 // Use는 Put/Pipe 연산 전후에 실행할 미들웨어를 체인에 등록합니다.
 // 여러 번 호출하면 등록한 순서대로 체인에 누적되며, nil 핸들러는 실행 시 건너뜁니다.
 //
-// 미들웨어는 연산을 중단하거나 취소할 수 없습니다. 자세한 내용은 [Context.Next]를 참고하십시오.
+// 등록한 미들웨어는 Put 단계와 Pipe 단계 양쪽에서 모두 실행됩니다.
+// 미들웨어는 연산을 중단하거나 취소할 수 없으며, Pipe 단계에서 발생한 panic은 복구되지 않고
+// 프로세스를 종료시킵니다. 자세한 내용은 [Context.Next]를 참고하십시오.
 func (q *Queue[T]) Use(handlerFunc ...HandlerFunc[T]) {
 	if q == nil {
 		return

@@ -11,6 +11,16 @@ import (
 	"gopkg.in/natefinch/lumberjack.v2"
 )
 
+type ErrorType string
+
+func (e ErrorType) Error() string {
+	return string(e)
+}
+
+const (
+	ErrEmptyPath = ErrorType("logger: config path is empty")
+)
+
 type LogLevel = slog.Level
 
 const (
@@ -34,7 +44,17 @@ var (
 	logCloser io.Closer
 )
 
+// Init은 로그 파일 기반 핸들러를 구성하고 slog 기본 로거로 등록합니다.
+// 이미 초기화된 상태에서 다시 호출하면 기존 로그 파일을 닫고 새 설정으로 교체합니다.
+//
+// cfg.Path가 비어 있으면 ErrEmptyPath를 반환합니다.
+// (빈 경로를 그대로 넘기면 로그가 의도치 않게 임시 디렉터리로 기록되므로 사전에 차단합니다.)
+// MaxSize/MaxBackups/MaxAge가 0이면 각각 100(MB)/100(개)/30(일)이 적용됩니다.
 func Init(cfg Config) error {
+	if cfg.Path == "" {
+		return ErrEmptyPath
+	}
+
 	mu.Lock()
 	defer mu.Unlock()
 

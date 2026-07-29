@@ -2,6 +2,7 @@ package logger
 
 import (
 	"context"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"strings"
@@ -83,6 +84,86 @@ func TestLogger(t *testing.T) {
 	}
 
 	t.Logf("Success! Log file content:\n%s", logContent)
+}
+
+// Init은 빈 Path를 거부해야 함 (빈 값이면 로그가 임시 디렉터리로 새어나감)
+func TestLogger_InitEmptyPath(t *testing.T) {
+	if err := Init(Config{Level: LogLevelInfo}); err != ErrEmptyPath {
+		t.Errorf("빈 Path로 Init: ErrEmptyPath 기대, 실제 %v", err)
+	}
+}
+
+// slog 규약 검증: WithGroup은 "그 이후에 추가된" 속성만 그룹으로 한정해야 하며,
+// WithGroup 이전에 등록된 속성은 그룹의 영향을 받지 않아야 함.
+func TestLogger_GroupAndAttrs(t *testing.T) {
+	logPath := filepath.Join(t.TempDir(), "group.log")
+	if err := Init(Config{Path: logPath, Level: LogLevelInfo}); err != nil {
+		t.Fatalf("failed to initialize logger: %v", err)
+	}
+
+	// case1: 그룹 이전 속성(before)은 한정되지 않고, 이후 속성(after)과 레코드 속성(inline)만 한정
+	slog.Default().With("before", 1).WithGroup("g").With("after", 2).Info("case1", "inline", 3)
+	// case2: 중첩 그룹 - x는 g1에서만, y는 g1.g2에서 한정
+	slog.Default().WithGroup("g1").With("x", 1).WithGroup("g2").Info("case2", "y", 2)
+	// case3: 속성 없는 그룹은 아무것도 출력하지 않음
+	slog.Default().WithGroup("empty").Info("case3")
+	// case4: 그룹 값 속성은 그룹명을 접두사로 펼침
+	slog.Default().Info("case4", slog.Group("gr", "a", 1, "b", 2))
+	// case5: 빈 그룹 값 속성은 생략
+	slog.Default().Info("case5", slog.Group("emptygr"))
+
+	if err := Close(); err != nil {
+		t.Fatalf("failed to close logger: %v", err)
+	}
+
+	logBytes, err := os.ReadFile(logPath)
+	if err != nil {
+		t.Fatalf("failed to read log file: %v", err)
+	}
+	lines := strings.Split(strings.TrimSpace(string(logBytes)), "\n")
+
+	// 메시지 이후의 속성 문자열만 추출
+	attrsOf := func(msg string) (string, bool) {
+		for _, line := range lines {
+			if idx := strings.Index(line, msg); idx >= 0 {
+				return strings.TrimSpace(line[idx+len(msg):]), true
+			}
+		}
+		return "", false
+	}
+
+	cases := []struct {
+		msg  string
+		want string
+	}{
+		{"case1", "before=1 g.after=2 g.inline=3"},
+		{"case2", "g1.x=1 g1.g2.y=2"},
+		{"case3", ""},
+		{"case4", "gr.a=1 gr.b=2"},
+		{"case5", ""},
+	}
+
+	t.Logf("==================================================")
+	t.Logf(" [시험 목적 및 조건]")
+	t.Logf("  - 시험 목적 : WithAttrs/WithGroup의 slog 규약 준수 검증")
+	t.Logf("  - 시험 조건 : 그룹 전/후 속성, 중첩 그룹, 빈 그룹, 그룹 값 속성")
+	t.Logf("--------------------------------------------------")
+
+	for _, c := range cases {
+		got, ok := attrsOf(c.msg)
+		if !ok {
+			t.Errorf("%s: 로그 라인을 찾지 못함", c.msg)
+			continue
+		}
+		if got != c.want {
+			t.Errorf("%s: 속성 불일치\n  기대: %q\n  실제: %q", c.msg, c.want, got)
+			continue
+		}
+		t.Logf("  - %s : %q", c.msg, got)
+	}
+
+	t.Logf(" [시험 결과] : 정상 (그룹 한정 범위가 slog 규약과 일치)")
+	t.Logf("==================================================")
 }
 
 func BenchmarkLogger(b *testing.B) {
