@@ -2,6 +2,7 @@ package pipequeue
 
 import (
 	"sync"
+	"sync/atomic"
 )
 
 type ErrorType string
@@ -29,9 +30,10 @@ type HandlerFunc[T any] func(*Context[T])
 type Queue[T any] struct {
 	mu       sync.RWMutex
 	isClosed bool
+	closeSig chan struct{}
 	inCh     chan T
 	outCh    chan T
-	closeSig chan struct{}
+	len      atomic.Int64
 
 	pool         sync.Pool
 	handlers     []HandlerFunc[T]
@@ -164,11 +166,7 @@ func (q *Queue[T]) Len() int {
 		return 0
 	}
 
-	q.mu.RLock()
-	defer q.mu.RUnlock()
-
-	// close된 채널에서 처리 가능함
-	return len(q.inCh)
+	return int(q.len.Load())
 }
 
 func (q *Queue[T]) Cap() int {
@@ -176,10 +174,7 @@ func (q *Queue[T]) Cap() int {
 		return 0
 	}
 
-	q.mu.RLock()
-	defer q.mu.RUnlock()
-
-	// close된 채널에서 처리 가능함
+	// close된 채널에서도 cap 처리 가능함
 	return cap(q.inCh)
 }
 
@@ -188,11 +183,8 @@ func (q *Queue[T]) IsFull() bool {
 		return false
 	}
 
-	q.mu.RLock()
-	defer q.mu.RUnlock()
-
-	// close된 채널에서 처리 가능함
-	return len(q.inCh) == cap(q.inCh)
+	// q.len은 atomic, cap(inCh)은 불변이므로 락이 필요하지 않음
+	return int(q.len.Load()) >= cap(q.inCh)
 }
 
 func (q *Queue[T]) IsClosed() bool {
@@ -232,6 +224,8 @@ func (q *Queue[T]) pipe() {
 		return
 	}
 	defer close(q.outCh)
+	// inCh에 문제가 발생했거나 Close() 메서드 호출된 경우 len을 0으로 초기화
+	defer q.len.Store(0)
 
 	for {
 		select {
@@ -246,6 +240,7 @@ func (q *Queue[T]) pipe() {
 
 			c.index, c.action, c.data = -1, ActionPipe, data
 			c.Next()
+			q.len.Add(-1)
 
 			c.reset()
 			q.pool.Put(c)
@@ -257,20 +252,23 @@ func (q *Queue[T]) pipe() {
 }
 
 func (q *Queue[T]) put(data T) (err error) {
-	// RLock을 사용해도 채널에서 동기화 가능
-	q.mu.RLock()
-	defer q.mu.RUnlock()
+	// 배타 락 필수: q.len 검사 -> 카운터 증가 -> inCh 송신이 원자적으로 실행되어야 한다.
+	// 읽기 락으로 바꾸면 두 고루틴이 동시에 검사를 통과해 카운터가 깨지고,
+	// 버퍼가 넘칠 경우 송신이 영구 대기하며 Close까지 막는다.
+	q.mu.Lock()
+	defer q.mu.Unlock()
 
 	if q.isClosed {
 		return ErrClosed
 	}
 
-	select {
-	case q.inCh <- data:
-		return nil
-	default:
+	if int(q.len.Load()) >= cap(q.inCh) {
 		return ErrFull
 	}
+
+	q.len.Add(1)
+	q.inCh <- data
+	return nil
 }
 
 func (q *Queue[T]) write(data T) {

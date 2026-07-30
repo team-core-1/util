@@ -363,3 +363,159 @@ func TestQueue_ConcurrentClose(t *testing.T) {
 	t.Logf("==================================================")
 	record(t, fmt.Sprintf("Succ(Enq:%d, Deq:%d), ClosedDetected(Enq:%d, Deq:%d)", enqueueSuccCount.Load(), dequeueSuccCount.Load(), enqueueClosedCount.Load(), dequeueClosedCount.Load()))
 }
+
+// 4. Len()이 in-flight 항목을 집계하는지 검증
+//
+// pipe 고루틴이 inCh에서 꺼냈지만 아직 C()로 전달하지 못한 항목은
+// inCh에도 outCh에도 존재하지 않는다(outCh는 무버퍼).
+// 이 구간을 집계하지 않으면 Len()이 실제보다 적게 보고되어,
+// Len()으로 정원을 계산하는 사용자(timer 등)가 용량을 초과 수용하게 된다.
+func TestQueue_LenCountsInFlight(t *testing.T) {
+	const capacity = 4
+
+	q, err := New[int](capacity)
+	if err != nil {
+		t.Fatalf("큐 생성 실패: %v", err)
+	}
+
+	// pipe 단계 진입 시점을 포착하여 in-flight 상태를 결정적으로 만든다.
+	// 수신자를 두지 않으므로 진입한 항목은 outCh 송신에서 대기한 채 머무른다.
+	entered := make(chan struct{})
+	var once sync.Once
+	q.Use(func(c *Context[int]) {
+		if c.Action() == ActionPipe {
+			once.Do(func() { close(entered) })
+		}
+		c.Next()
+	})
+
+	t.Logf("==================================================")
+	t.Logf(" [시험 목적 및 조건]")
+	t.Logf("  - 시험 목적 : pipe 고루틴이 점유 중인(in-flight) 항목의 Len() 집계 검증")
+	t.Logf("  - 시험 조건 : Capacity:%d, 수신자 없음", capacity)
+	t.Logf("--------------------------------------------------")
+
+	if err := q.Put(1); err != nil {
+		t.Fatalf("Put 실패: %v", err)
+	}
+
+	select {
+	case <-entered:
+	case <-time.After(3 * time.Second):
+		t.Fatalf("pipe 단계 진입 대기 시간 초과")
+	}
+
+	// 이 시점: 항목은 inCh에서 빠졌고 아직 C()로 전달되지 않은 in-flight 상태
+	inFlightLen := q.Len()
+	if inFlightLen != 1 {
+		t.Errorf("in-flight 항목 미집계: Len()=1 기대, 실제 %d", inFlightLen)
+	}
+
+	// 버퍼에 추가로 쌓아도 총계가 정확해야 함
+	for i := 2; i <= capacity; i++ {
+		if err := q.Put(i); err != nil {
+			t.Errorf("Put(%d) 실패: %v", i, err)
+		}
+	}
+	fullLen := q.Len()
+	if fullLen != capacity {
+		t.Errorf("총계 불일치: Len()=%d 기대, 실제 %d", capacity, fullLen)
+	}
+	if fullLen > q.Cap() {
+		t.Errorf("Len()이 Cap()을 초과함: Len()=%d, Cap()=%d", fullLen, q.Cap())
+	}
+
+	// Close 시점에 pipe가 갚지 않은 감소분이 남아 있어도 음수가 되어서는 안 됨
+	q.Close()
+
+	// outCh가 닫히면 pipe 고루틴이 종료된 것 (카운터 정리 완료)
+	for range q.C() {
+	}
+
+	closedLen := q.Len()
+	if closedLen < 0 {
+		t.Errorf("Close 후 Len()이 음수: %d", closedLen)
+	}
+	if closedLen != 0 {
+		t.Errorf("Close 후 Len(): 0 기대, 실제 %d", closedLen)
+	}
+
+	t.Logf(" [테스트 수치]")
+	t.Logf("  - in-flight 1건일 때 Len() : %d (예상치: 1)", inFlightLen)
+	t.Logf("  - 정원까지 채웠을 때 Len() : %d / Cap: %d", fullLen, q.Cap())
+	t.Logf("  - Close 이후 Len()         : %d (예상치: 0)", closedLen)
+	t.Logf("--------------------------------------------------")
+	t.Logf(" [시험 결과] : 정상 (in-flight 집계 및 Close 후 카운터 정리 확인)")
+	t.Logf("==================================================")
+
+	record(t, fmt.Sprintf("InFlight:%d, Full:%d/%d, AfterClose:%d", inFlightLen, fullLen, q.Cap(), closedLen))
+}
+
+// 5. IsFull()과 Put()의 수용 기준이 일치하는지 검증
+//
+// IsFull()이 버퍼 길이만 보고 Put()이 총 보유량을 보면,
+// in-flight 항목이 있을 때 "안 찼다"고 답한 직후 Put이 ErrFull을 반환하게 된다.
+func TestQueue_IsFullMatchesPut(t *testing.T) {
+	const capacity = 2
+
+	q, err := New[int](capacity)
+	if err != nil {
+		t.Fatalf("큐 생성 실패: %v", err)
+	}
+	defer q.Close()
+
+	// 첫 항목이 in-flight 상태가 되도록 pipe 단계 진입을 기다린다.
+	entered := make(chan struct{})
+	var once sync.Once
+	q.Use(func(c *Context[int]) {
+		if c.Action() == ActionPipe {
+			once.Do(func() { close(entered) })
+		}
+		c.Next()
+	})
+
+	t.Logf("==================================================")
+	t.Logf(" [시험 목적 및 조건]")
+	t.Logf("  - 시험 목적 : in-flight 항목이 있을 때 IsFull()과 Put()의 판정 일치 검증")
+	t.Logf("  - 시험 조건 : Capacity:%d, 수신자 없음", capacity)
+	t.Logf("--------------------------------------------------")
+
+	if err := q.Put(0); err != nil {
+		t.Fatalf("Put 실패: %v", err)
+	}
+	select {
+	case <-entered:
+	case <-time.After(3 * time.Second):
+		t.Fatalf("pipe 단계 진입 대기 시간 초과")
+	}
+
+	// 이후 상태를 바꿔 가며 두 판정이 항상 같은 결론을 내는지 확인
+	mismatch := 0
+	for i := 1; i <= capacity+1; i++ {
+		full := q.IsFull()
+		putErr := q.Put(i)
+
+		switch {
+		case full && putErr != ErrFull:
+			mismatch++
+			t.Errorf("Len()=%d: IsFull()=true 인데 Put()=%v (ErrFull 기대)", q.Len(), putErr)
+		case !full && putErr != nil:
+			mismatch++
+			t.Errorf("Len()=%d: IsFull()=false 인데 Put()=%v (성공 기대)", q.Len(), putErr)
+		}
+		t.Logf("  - Len=%d Cap=%d : IsFull()=%-5v Put()=%v", q.Len(), q.Cap(), full, putErr)
+	}
+
+	if q.Len() != capacity {
+		t.Errorf("최종 Len(): %d 기대, 실제 %d", capacity, q.Len())
+	}
+	if !q.IsFull() {
+		t.Errorf("정원 도달 상태인데 IsFull()=false (Len=%d, Cap=%d)", q.Len(), q.Cap())
+	}
+
+	t.Logf("--------------------------------------------------")
+	t.Logf(" [시험 결과] : 정상 (불일치 %d건)", mismatch)
+	t.Logf("==================================================")
+
+	record(t, fmt.Sprintf("IsFull/Put agreement verified (mismatch:%d)", mismatch))
+}
