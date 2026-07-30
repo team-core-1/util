@@ -297,11 +297,11 @@ func TestHashMap_Errors(t *testing.T) {
 	}
 
 	// 6-6. nil 콜백
-	if _, err := hm.Do(1, nil); err != ErrCbNil {
-		t.Errorf("Do(nil): ErrCbNil 기대, 실제 %v", err)
+	if _, err := hm.Do(1, nil); err != ErrNilCallback {
+		t.Errorf("Do(nil): ErrNilCallback 기대, 실제 %v", err)
 	}
-	if _, err := hm.DoAll(nil); err != ErrCbNil {
-		t.Errorf("DoAll(nil): ErrCbNil 기대, 실제 %v", err)
+	if _, err := hm.DoAll(nil); err != ErrNilCallback {
+		t.Errorf("DoAll(nil): ErrNilCallback 기대, 실제 %v", err)
 	}
 
 	// 6-7. Close 이후 접근

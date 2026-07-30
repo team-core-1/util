@@ -80,19 +80,19 @@ func New[T any](timingWheel *timingwheel.TimingWheel, capacity int) (*Engine[T],
 		return nil, err
 	}
 
-	engine := &Engine[T]{
+	eng := &Engine[T]{
 		timingWheel: timingWheel,
 		pq:          pq,
 		cap:         capacity,
 	}
 
-	engine.pool.New = func() any {
+	eng.pool.New = func() any {
 		return &Context[T]{}
 	}
 
-	engine.rebuildHandlers()
+	eng.rebuildHandlers()
 
-	return engine, nil
+	return eng, nil
 }
 
 // Close는 엔진을 닫고 내부 만료 큐를 해제합니다. 여러 번 호출해도 안전합니다.
@@ -107,68 +107,68 @@ func New[T any](timingWheel *timingwheel.TimingWheel, capacity int) (*Engine[T],
 //
 // timingWheel은 외부에서 주입받은 자원이므로 Close가 정지시키지 않습니다.
 // 소유자가 직접 Stop을 호출해야 합니다.
-func (engine *Engine[T]) Close() {
-	if engine == nil {
+func (eng *Engine[T]) Close() {
+	if eng == nil {
 		return
 	}
 
-	engine.mu.Lock()
-	defer engine.mu.Unlock()
+	eng.mu.Lock()
+	defer eng.mu.Unlock()
 
-	if engine.isClosed {
+	if eng.isClosed {
 		return
 	}
 
-	engine.isClosed = true
-	engine.pq.Close()
+	eng.isClosed = true
+	eng.pq.Close()
 }
 
-func (engine *Engine[T]) Set(d time.Duration, key T) (*Timer, error) {
-	if engine == nil {
+func (eng *Engine[T]) Set(d time.Duration, key T) (*Timer, error) {
+	if eng == nil {
 		return nil, ErrNil
 	}
 
-	c := engine.pool.Get().(*Context[T])
+	c := eng.pool.Get().(*Context[T])
 	defer func() {
 		c.reset()
-		engine.pool.Put(c)
+		eng.pool.Put(c)
 	}()
 
-	engine.mu.RLock() // RLock()으로 가능한지 확인
-	c.handlers = engine.setHandlers
-	engine.mu.RUnlock()
+	eng.mu.RLock() // RLock()으로 가능한지 확인
+	c.handlers = eng.setHandlers
+	eng.mu.RUnlock()
 
 	c.index, c.action, c.dur, c.key = -1, ActionSet, d, key
 	c.Next()
 	return c.timer, c.err
 }
 
-func (engine *Engine[T]) Cancel(timer *Timer) error {
-	if (engine == nil) || (timer == nil) {
+func (eng *Engine[T]) Cancel(timer *Timer) error {
+	if (eng == nil) || (timer == nil) {
 		return ErrNil
 	}
 
-	c := engine.pool.Get().(*Context[T])
+	c := eng.pool.Get().(*Context[T])
 	defer func() {
 		c.reset()
-		engine.pool.Put(c)
+		eng.pool.Put(c)
 	}()
 
-	engine.mu.RLock()
-	c.handlers = engine.cancelHandlers
-	engine.mu.RUnlock()
+	eng.mu.RLock()
+	c.handlers = eng.cancelHandlers
+	eng.mu.RUnlock()
 
 	c.index, c.action, c.timer = -1, ActionCancel, timer
 	c.Next()
 	return c.err
 }
 
-func (engine *Engine[T]) C() <-chan T {
-	if engine == nil {
+func (eng *Engine[T]) C() <-chan T {
+	if eng == nil {
 		return nil
 	}
 
-	return engine.pq.C()
+	return eng.pq.C()
 }
 
 // Use는 Set/Cancel/Timeout 연산 전후에 실행할 미들웨어를 체인에 등록합니다.
@@ -177,108 +177,108 @@ func (engine *Engine[T]) C() <-chan T {
 // 등록한 미들웨어는 Set/Cancel/Timeout 단계에서 모두 실행됩니다.
 // 미들웨어는 연산을 중단하거나 취소할 수 없으며, Timeout 단계에서 발생한 panic은 복구되지 않고
 // 프로세스를 종료시킵니다. 자세한 내용은 [Context.Next]를 참고하십시오.
-func (engine *Engine[T]) Use(handlerFunc ...HandlerFunc[T]) {
-	if engine == nil {
+func (eng *Engine[T]) Use(handlerFunc ...HandlerFunc[T]) {
+	if eng == nil {
 		return
 	}
 
-	engine.mu.Lock()
-	defer engine.mu.Unlock()
+	eng.mu.Lock()
+	defer eng.mu.Unlock()
 
-	engine.rebuildHandlers(handlerFunc...)
+	eng.rebuildHandlers(handlerFunc...)
 }
 
 // Len은 현재 사용 중인 타이머 수(대기 중 + 만료 큐 적재분)를 반환합니다.
 //
 // 두 값을 각각 읽어 더하므로 하나의 시점에 대한 원자적 스냅샷은 아닙니다.
 // 집계 중에도 다른 고루틴의 Set/Cancel/만료가 진행될 수 있으므로 근사값으로 사용하십시오.
-func (engine *Engine[T]) Len() int {
-	if engine == nil {
+func (eng *Engine[T]) Len() int {
+	if eng == nil {
 		return 0
 	}
 
-	engine.mu.RLock()
-	defer engine.mu.RUnlock()
+	eng.mu.RLock()
+	defer eng.mu.RUnlock()
 
-	return int(engine.active.Load()) + engine.pq.Len()
+	return int(eng.active.Load()) + eng.pq.Len()
 }
 
-func (engine *Engine[T]) Cap() int {
-	if engine == nil {
+func (eng *Engine[T]) Cap() int {
+	if eng == nil {
 		return 0
 	}
 
-	return engine.cap
+	return eng.cap
 }
 
-func (engine *Engine[T]) IsClosed() bool {
-	if engine == nil {
+func (eng *Engine[T]) IsClosed() bool {
+	if eng == nil {
 		return true
 	}
 
-	engine.mu.RLock()
-	defer engine.mu.RUnlock()
+	eng.mu.RLock()
+	defer eng.mu.RUnlock()
 
-	return engine.isClosed
+	return eng.isClosed
 }
 
-func (engine *Engine[T]) QFail() int {
-	if engine == nil {
+func (eng *Engine[T]) QFail() int {
+	if eng == nil {
 		return 0
 	}
 
-	engine.mu.RLock()
-	defer engine.mu.RUnlock()
+	eng.mu.RLock()
+	defer eng.mu.RUnlock()
 
-	return int(engine.qFail.Load())
+	return int(eng.qFail.Load())
 }
 
-func (engine *Engine[T]) rebuildHandlers(handlerFunc ...HandlerFunc[T]) {
-	engine.handlers = append(engine.handlers, handlerFunc...)
+func (eng *Engine[T]) rebuildHandlers(handlerFunc ...HandlerFunc[T]) {
+	eng.handlers = append(eng.handlers, handlerFunc...)
 
 	// Middleware + settimer handlers
-	engine.setHandlers = make([]HandlerFunc[T], len(engine.handlers)+1)
-	copy(engine.setHandlers, engine.handlers)
-	engine.setHandlers[len(engine.handlers)] = func(c *Context[T]) {
-		c.timer, c.err = engine.setTimer(c.dur, c.key)
+	eng.setHandlers = make([]HandlerFunc[T], len(eng.handlers)+1)
+	copy(eng.setHandlers, eng.handlers)
+	eng.setHandlers[len(eng.handlers)] = func(c *Context[T]) {
+		c.timer, c.err = eng.setTimer(c.dur, c.key)
 	}
 
 	// Middleware + canceltimer handlers
-	engine.cancelHandlers = make([]HandlerFunc[T], len(engine.handlers)+1)
-	copy(engine.cancelHandlers, engine.handlers)
-	engine.cancelHandlers[len(engine.handlers)] = func(c *Context[T]) {
-		c.err = engine.cancelTimer(c.timer)
+	eng.cancelHandlers = make([]HandlerFunc[T], len(eng.handlers)+1)
+	copy(eng.cancelHandlers, eng.handlers)
+	eng.cancelHandlers[len(eng.handlers)] = func(c *Context[T]) {
+		c.err = eng.cancelTimer(c.timer)
 	}
 
 	// Middleware + timeout handlers
-	engine.timeoutHandlers = make([]HandlerFunc[T], len(engine.handlers)+1)
-	copy(engine.timeoutHandlers, engine.handlers)
-	engine.timeoutHandlers[len(engine.handlers)] = func(c *Context[T]) {
-		c.err = engine.timeout(c.key)
+	eng.timeoutHandlers = make([]HandlerFunc[T], len(eng.handlers)+1)
+	copy(eng.timeoutHandlers, eng.handlers)
+	eng.timeoutHandlers[len(eng.handlers)] = func(c *Context[T]) {
+		c.err = eng.timeout(c.key)
 	}
 }
 
-func (engine *Engine[T]) setTimer(d time.Duration, key T) (*Timer, error) {
-	engine.mu.RLock()
-	if engine.isClosed {
-		engine.mu.RUnlock()
+func (eng *Engine[T]) setTimer(d time.Duration, key T) (*Timer, error) {
+	eng.mu.RLock()
+	if eng.isClosed {
+		eng.mu.RUnlock()
 		return nil, ErrClosed
 	}
-	engine.mu.RUnlock()
+	eng.mu.RUnlock()
 
 	// full이면 에러를 리턴하고, 경합이면 CAS로 +1하고 루프 탈출
 	for {
-		active := engine.active.Load()
-		if (int(active) + engine.pq.Len()) >= engine.cap {
+		active := eng.active.Load()
+		if (int(active) + eng.pq.Len()) >= eng.cap {
 			return nil, ErrExpiredQueueFull
 		}
-		if engine.active.CompareAndSwap(active, active+1) {
+		if eng.active.CompareAndSwap(active, active+1) {
 			break
 		}
 	}
 
 	timer := &Timer{
-		owner: engine,
+		owner: eng,
 	}
 
 	timer.mu.Lock()
@@ -299,36 +299,36 @@ func (engine *Engine[T]) setTimer(d time.Duration, key T) (*Timer, error) {
 			return
 		}
 
-		defer engine.active.Add(-1)
+		defer eng.active.Add(-1)
 
-		c := engine.pool.Get().(*Context[T])
+		c := eng.pool.Get().(*Context[T])
 		defer func() {
 			c.reset()
-			engine.pool.Put(c)
+			eng.pool.Put(c)
 		}()
 
-		engine.mu.RLock()
-		c.handlers = engine.timeoutHandlers
-		engine.mu.RUnlock()
+		eng.mu.RLock()
+		c.handlers = eng.timeoutHandlers
+		eng.mu.RUnlock()
 
 		c.index, c.action, c.key = -1, ActionTimeout, key
 		c.Next()
 	}
 
-	timer.timingWheelTimer = engine.timingWheel.AfterFunc(d, timeoutFunc)
+	timer.timingWheelTimer = eng.timingWheel.AfterFunc(d, timeoutFunc)
 
 	return timer, nil
 }
 
 // Cancel은 Set이 완료된 후 timeout과 경합 체크 필요
-func (engine *Engine[T]) cancelTimer(timer *Timer) error {
+func (eng *Engine[T]) cancelTimer(timer *Timer) error {
 	timer.mu.Lock()
 	defer timer.mu.Unlock()
 
 	// 다른 엔진이 발급한 타이머는 취소할 수 없음
 	// (소유권 검사가 없으면 요청한 엔진의 active가 부당하게 감소해 음수가 되고,
 	//  실제 소유 엔진은 카운터가 줄지 않아 용량을 영구히 잠식당함)
-	if timer.owner != any(engine) {
+	if timer.owner != any(eng) {
 		return ErrNotOwner
 	}
 
@@ -337,7 +337,7 @@ func (engine *Engine[T]) cancelTimer(timer *Timer) error {
 		return ErrAlreadyCancelled
 	}
 
-	engine.active.Add(-1)
+	eng.active.Add(-1)
 
 	timer.timingWheelTimer.Stop()
 	timer.timingWheelTimer = nil
@@ -345,9 +345,9 @@ func (engine *Engine[T]) cancelTimer(timer *Timer) error {
 	return nil
 }
 
-func (engine *Engine[T]) timeout(key T) error {
-	if err := engine.pq.Put(key); err != nil {
-		engine.qFail.Add(1)
+func (eng *Engine[T]) timeout(key T) error {
+	if err := eng.pq.Put(key); err != nil {
+		eng.qFail.Add(1)
 		return ErrExpiredQueueFail
 	}
 

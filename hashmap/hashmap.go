@@ -17,7 +17,7 @@ const (
 	ErrFull        = ErrorType("hashmap: map is full")
 	ErrDupKey      = ErrorType("hashmap: duplicated key")
 	ErrKeyNotFound = ErrorType("hashmap: key not found")
-	ErrCbNil       = ErrorType("hashmap: callback nil")
+	ErrNilCallback = ErrorType("hashmap: callback is nil")
 	ErrClosed      = ErrorType("hashmap: map is closed")
 )
 
@@ -206,7 +206,7 @@ func (hm *Map[K, V]) All() iter.Seq2[K, V] {
 
 // Do는 지정한 키(key)가 존재할 경우, 해당 키와 값을 인자로 전달하여 콜백 함수(fn)를 실행하고
 // 콜백의 반환값을 그대로 전달합니다.
-// 키가 없으면 ErrKeyNotFound, 콜백이 nil이면 ErrCbNil, Close된 맵이면 ErrClosed를 반환합니다.
+// 키가 없으면 ErrKeyNotFound, 콜백이 nil이면 ErrNilCallback, Close된 맵이면 ErrClosed를 반환합니다.
 //
 // 반환 타입 int는 콜백이 산출한 임의의 정수 결과를 호출 측으로 전달하기 위한 것입니다.
 // (DoAll은 이 값을 누적하여 합계를 반환합니다. 값이 필요 없으면 0을 반환하면 됩니다.)
@@ -240,7 +240,7 @@ func (hm *Map[K, V]) Do(key K, fn func(K, V) (int, error)) (int, error) {
 	}
 
 	if fn == nil {
-		return 0, ErrCbNil
+		return 0, ErrNilCallback
 	}
 
 	v, ok := hm.m[key]
@@ -282,7 +282,7 @@ func (hm *Map[K, V]) DoAll(fn func(K, V) (int, error)) (int, error) {
 	}
 
 	if fn == nil {
-		return 0, ErrCbNil
+		return 0, ErrNilCallback
 	}
 
 	sum := 0
@@ -340,6 +340,17 @@ func (hm *Map[K, V]) Cap() int {
 	}
 
 	return hm.cap
+}
+
+func (hm *Map[K, V]) IsClosed() bool {
+	if hm == nil {
+		return true
+	}
+
+	hm.mu.RLock()
+	defer hm.mu.RUnlock()
+
+	return hm.m == nil
 }
 
 func (hm *Map[K, V]) rebuildHandlers(handlerFunc ...HandlerFunc[K, V]) {

@@ -49,10 +49,43 @@ var (
 //
 // cfg.Path가 비어 있으면 ErrEmptyPath를 반환합니다.
 // (빈 경로를 그대로 넘기면 로그가 의도치 않게 임시 디렉터리로 기록되므로 사전에 차단합니다.)
-// MaxSize/MaxBackups/MaxAge가 0이면 각각 100(MB)/100(개)/30(일)이 적용됩니다.
+// MaxSize/MaxBackups/MaxAge가 0 이하이면 각각 100(MB)/100(개)/30(일)이 적용됩니다.
+//
+// Init은 설정 검증을 마친 뒤에야 기존 로거를 교체합니다.
+// 따라서 Init이 에러를 반환하면 직전까지 사용하던 로거가 그대로 유지되며,
+// 잘못된 설정 때문에 로그가 끊기는 일은 없습니다.
 func Init(cfg Config) error {
 	if cfg.Path == "" {
 		return ErrEmptyPath
+	}
+
+	if cfg.MaxSize <= 0 {
+		cfg.MaxSize = 100
+	}
+	if cfg.MaxBackups <= 0 {
+		cfg.MaxBackups = 100
+	}
+	if cfg.MaxAge <= 0 {
+		cfg.MaxAge = 30
+	}
+
+	dir := filepath.Dir(cfg.Path)
+	if err := os.MkdirAll(dir, 0755); err != nil {
+		return err
+	}
+
+	// 로그 파일을 실제로 열어 기록 가능한지 미리 확인한다.
+	// lumberjack은 첫 기록 시점에야 파일을 열고, 그때 발생한 오류는
+	// slog가 핸들러의 반환 에러를 버리기 때문에 어디에도 드러나지 않는다.
+	// 여기서 확인하지 않으면 권한 부족, 경로가 디렉터리인 경우 등이
+	// 아무 신호 없이 로그 전량 유실로 이어진다.
+	// 파일 모드 0600은 lumberjack이 새 파일을 만들 때 쓰는 값과 동일하다.
+	f, err := os.OpenFile(cfg.Path, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0600)
+	if err != nil {
+		return err
+	}
+	if err := f.Close(); err != nil {
+		return err
 	}
 
 	mu.Lock()
@@ -61,21 +94,6 @@ func Init(cfg Config) error {
 	if logCloser != nil {
 		_ = logCloser.Close()
 		logCloser = nil
-	}
-
-	if cfg.MaxSize == 0 {
-		cfg.MaxSize = 100
-	}
-	if cfg.MaxBackups == 0 {
-		cfg.MaxBackups = 100
-	}
-	if cfg.MaxAge == 0 {
-		cfg.MaxAge = 30
-	}
-
-	dir := filepath.Dir(cfg.Path)
-	if err := os.MkdirAll(dir, 0755); err != nil {
-		return err
 	}
 
 	logWriter := &lumberjack.Logger{

@@ -15,7 +15,7 @@ const (
 	ErrInvalidCap = ErrorType("pipequeue: invalid capacity")
 	ErrNil        = ErrorType("pipequeue: nil")
 	ErrClosed     = ErrorType("pipequeue: closed")
-	ErrFull       = ErrorType("pipequeue: put full")
+	ErrFull       = ErrorType("pipequeue: put is full")
 )
 
 type ActionType int

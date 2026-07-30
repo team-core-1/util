@@ -115,8 +115,8 @@ func TestPool_Errors(t *testing.T) {
 	// Put free index should fail (double free)
 	_ = ip.Put(idx1)
 	err = ip.Put(idx1)
-	if err != ErrNotAllocIndex {
-		t.Errorf("expected ErrNotAllocIndex (double free), got %v", err)
+	if err != ErrNotAllocatedIndex {
+		t.Errorf("expected ErrNotAllocatedIndex (double free), got %v", err)
 	}
 
 	_ = ip.Put(idx2)
@@ -125,7 +125,7 @@ func TestPool_Errors(t *testing.T) {
 	t.Logf(" [테스트 수치]")
 	t.Logf("--------------------------------------------------")
 	t.Logf("  - 에러 처리 시도 횟수 : 5회")
-	t.Logf("  - 감지된 에러 형태   : ErrNotAllocIndex, ErrEmpty, ErrInvalidIndex")
+	t.Logf("  - 감지된 에러 형태   : ErrNotAllocatedIndex, ErrEmpty, ErrInvalidIndex")
 	t.Logf("==================================================")
 	t.Logf(" [시험 결과] : 정상 (모든 에러 상황 차단 확인)")
 	t.Logf("==================================================")
@@ -225,7 +225,7 @@ func TestPool_AccessConcurrency(t *testing.T) {
 			})
 
 			if err != nil {
-				if err == ErrInuseIndex {
+				if err == ErrInUseIndex {
 					accessFailInuseCount.Add(1)
 				} else {
 					otherErrCount.Add(1)
@@ -253,9 +253,9 @@ func TestPool_AccessConcurrency(t *testing.T) {
 	}
 
 	if accessFailInuseCount.Load() != uint64(goroutineCount-1) {
-		t.Errorf("  - 오작동 감지 : ErrInuseIndex 에러 감지 횟수 불일치 (실제: %d, 예상: %d)", accessFailInuseCount.Load(), goroutineCount-1)
+		t.Errorf("  - 오작동 감지 : ErrInUseIndex 에러 감지 횟수 불일치 (실제: %d, 예상: %d)", accessFailInuseCount.Load(), goroutineCount-1)
 	} else {
-		t.Logf("  - 에러 처리 성공 : 나머지 모든 고루틴은 ErrInuseIndex에 의해 비블로킹(Try-Lock)으로 거부됨")
+		t.Logf("  - 에러 처리 성공 : 나머지 모든 고루틴은 ErrInUseIndex에 의해 비블로킹(Try-Lock)으로 거부됨")
 	}
 	t.Logf("==================================================")
 	t.Logf(" [시험 결과] : 정상 (Access 동시 접근 동기화 제어 검증 완료)")
@@ -347,7 +347,7 @@ func TestPool_AccessLockBasic(t *testing.T) {
 
 	t.Logf("==================================================")
 	t.Logf(" [시험 목적 및 조건]")
-	t.Logf("  - 시험 목적 : AccessLock 기본 동작 및 에러 경로(ErrNil/ErrInvalidIndex/ErrNotAllocIndex) 검증")
+	t.Logf("  - 시험 목적 : AccessLock 기본 동작 및 에러 경로(ErrNil/ErrInvalidIndex/ErrNotAllocatedIndex) 검증")
 	t.Logf("  - 시험 조건 : Capacity: %d", capacity)
 	t.Logf("--------------------------------------------------")
 
@@ -366,8 +366,8 @@ func TestPool_AccessLockBasic(t *testing.T) {
 	}
 
 	// 3. 할당되지 않은(free) 슬롯
-	if err := ip.AccessLock(0, func(memPtr *string) {}); err != ErrNotAllocIndex {
-		t.Errorf("미할당 슬롯 AccessLock: ErrNotAllocIndex 기대, 실제 %v", err)
+	if err := ip.AccessLock(0, func(memPtr *string) {}); err != ErrNotAllocatedIndex {
+		t.Errorf("미할당 슬롯 AccessLock: ErrNotAllocatedIndex 기대, 실제 %v", err)
 	}
 
 	// 4. 정상 경로: 쓰기 -> 읽기
@@ -392,8 +392,8 @@ func TestPool_AccessLockBasic(t *testing.T) {
 	if err := ip.Put(idx); err != nil {
 		t.Fatalf("Put 실패: %v", err)
 	}
-	if err := ip.AccessLock(idx, func(memPtr *string) {}); err != ErrNotAllocIndex {
-		t.Errorf("Put 이후 AccessLock: ErrNotAllocIndex 기대, 실제 %v", err)
+	if err := ip.AccessLock(idx, func(memPtr *string) {}); err != ErrNotAllocatedIndex {
+		t.Errorf("Put 이후 AccessLock: ErrNotAllocatedIndex 기대, 실제 %v", err)
 	}
 
 	t.Logf("==================================================")
@@ -447,7 +447,7 @@ func TestPool_AccessLockConcurrency(t *testing.T) {
 			switch err {
 			case nil:
 				succCount.Add(1)
-			case ErrInuseIndex:
+			case ErrInUseIndex:
 				inuseCount.Add(1)
 			default:
 				otherErrCount.Add(1)
@@ -528,8 +528,8 @@ func TestPool_AccessLockMixedWithAccess(t *testing.T) {
 	// 1. Access가 점유 중이므로 AccessLock은 거부되어야 함
 	lockCallbackRan := false
 	errLock := ip.AccessLock(idx, func(memPtr *int) { lockCallbackRan = true })
-	if errLock != ErrInuseIndex {
-		t.Errorf("Access 점유 중 AccessLock: ErrInuseIndex 기대, 실제 %v", errLock)
+	if errLock != ErrInUseIndex {
+		t.Errorf("Access 점유 중 AccessLock: ErrInUseIndex 기대, 실제 %v", errLock)
 	}
 	if lockCallbackRan {
 		t.Errorf("오작동 감지 : 거부된 AccessLock의 콜백이 실행됨")
@@ -538,7 +538,7 @@ func TestPool_AccessLockMixedWithAccess(t *testing.T) {
 	// 2. 거부된 AccessLock이 Access의 InUse 플래그를 지우지 않았어야 함
 	//    지워졌다면 사용 중인 슬롯이 Put으로 회수되어 콜백과 레이스가 발생함
 	errPut := ip.Put(idx)
-	if errPut != ErrInuseIndex {
+	if errPut != ErrInUseIndex {
 		t.Errorf("오작동 감지 : 거부된 AccessLock이 Access의 InUse 상태를 해제함 -> 사용 중 슬롯 회수됨 (Put 결과: %v)", errPut)
 	}
 
@@ -563,8 +563,8 @@ func TestPool_AccessLockMixedWithAccess(t *testing.T) {
 	t.Logf("==================================================")
 	t.Logf(" [테스트 수치]")
 	t.Logf("--------------------------------------------------")
-	t.Logf("  - Access 점유 중 AccessLock 결과 : %v (예상치: %v)", errLock, ErrInuseIndex)
-	t.Logf("  - Access 점유 중 Put 결과        : %v (예상치: %v)", errPut, ErrInuseIndex)
+	t.Logf("  - Access 점유 중 AccessLock 결과 : %v (예상치: %v)", errLock, ErrInUseIndex)
+	t.Logf("  - Access 점유 중 Put 결과        : %v (예상치: %v)", errPut, ErrInUseIndex)
 	t.Logf("  - Access 콜백 기록값 보존        : %d (예상치: 7)", got)
 	t.Logf("  - 최종 남은 수량 (Len)           : %d / %d", ip.Len(), ip.Cap())
 	t.Logf("==================================================")
@@ -622,7 +622,7 @@ func TestPool_AccessLockPanicRecovery(t *testing.T) {
 		t.Errorf("  - 오작동 감지 : recover 이후 AccessLock 재진입 시 데드락이 발생함 (타임아웃)")
 	}
 
-	// 3. StateInUse가 복구되었는지 Access로 교차 확인 (잔존 시 ErrInuseIndex)
+	// 3. StateInUse가 복구되었는지 Access로 교차 확인 (잔존 시 ErrInUseIndex)
 	accessErr := ip.Access(idx, func(memPtr *int) {})
 
 	t.Logf("==================================================")
