@@ -494,3 +494,192 @@ func TestTimer_MemoryLeakCheck(t *testing.T) {
 	t.Logf("==================================================")
 	record(t, fmt.Sprintf("Before:%.2fMB, After:%.2fMB", float64(msBefore.Alloc)/1024/1024, float64(msAfter.Alloc)/1024/1024))
 }
+
+// 7. Close 이후의 Set은 실패해야 함 (결정적 경로)
+func TestTimer_SetAfterClose(t *testing.T) {
+	tw := timingwheel.NewTimingWheel(10*time.Millisecond, 20)
+	tw.Start()
+	defer tw.Stop()
+
+	eng, _ := New[int](tw, 10)
+
+	t.Logf("==================================================")
+	t.Logf(" [시험 목적 및 조건]")
+	t.Logf("  - 시험 목적 : Close 이후 Set이 ErrClosed를 반환하고 카운터를 소모하지 않는지 검증")
+	t.Logf("  - 시험 조건 : Capacity:10")
+	t.Logf("--------------------------------------------------")
+
+	tm, err := eng.Set(1*time.Hour, 1)
+	if err != nil {
+		t.Fatalf("Close 이전 Set 실패: %v", err)
+	}
+	if err := eng.Cancel(tm); err != nil {
+		t.Fatalf("Cancel 실패: %v", err)
+	}
+	before := eng.Len()
+
+	eng.Close()
+
+	for i := 0; i < 5; i++ {
+		tm, err := eng.Set(1*time.Hour, i)
+		if err != ErrClosed {
+			t.Errorf("Close 후 Set: ErrClosed 기대, 실제 %v", err)
+		}
+		if tm != nil {
+			t.Errorf("Close 후 Set: nil Timer 기대, 실제 %v", tm)
+		}
+	}
+
+	after := eng.Len()
+	if after != before {
+		t.Errorf("Close 후 실패한 Set이 카운터를 소모함: %d -> %d", before, after)
+	}
+	if after < 0 {
+		t.Errorf("Len()이 음수: %d", after)
+	}
+
+	t.Logf(" [테스트 수치]")
+	t.Logf("  - Close 전 Len : %d", before)
+	t.Logf("  - Close 후 Len : %d (예상치: %d)", after, before)
+	t.Logf("--------------------------------------------------")
+	t.Logf(" [시험 결과] : 정상 (Close 이후 Set 차단 및 카운터 보존 확인)")
+	t.Logf("==================================================")
+
+	record(t, fmt.Sprintf("Set after Close rejected, Len %d -> %d", before, after))
+}
+
+// 8. Set과 Close를 동시에 실행해도 카운터가 깨지지 않아야 함
+//
+// setTimer는 맨 앞에서 Close 여부를 검사하지만, 그 직후 AfterFunc로 등록을 마치기까지
+// 사이에 Close가 완료될 수 있다. 이 경우 등록을 되돌리는데(Stop + active 감소),
+// 되돌리기가 잘못되면 active가 누수되거나 timeoutFunc와 겹쳐 이중 감소한다.
+func TestTimer_ConcurrentSetClose(t *testing.T) {
+	const capacity = 50
+	const producers = 4
+	const trials = 20
+
+	tw := timingwheel.NewTimingWheel(10*time.Millisecond, 20)
+	tw.Start()
+	defer tw.Stop()
+
+	t.Logf("==================================================")
+	t.Logf(" [시험 목적 및 조건]")
+	t.Logf("  - 시험 목적 : Set/Close 동시 실행 시 등록 되돌리기의 카운터 무결성 검증")
+	t.Logf("  - 시험 조건 : Capacity:%d, 생산자:%d, 시행:%d회", capacity, producers, trials)
+	t.Logf("--------------------------------------------------")
+
+	var negative, overCap, notSettled int
+	var sawClosed, sawOK int
+
+	for i := 0; i < trials; i++ {
+		eng, _ := New[int](tw, capacity)
+		drained := make(chan struct{})
+		go func() {
+			defer close(drained)
+			for range eng.C() {
+			}
+		}()
+
+		var wg sync.WaitGroup
+		stop := make(chan struct{})
+		var minLen, maxLen atomic.Int64
+		maxLen.Store(-1 << 62)
+		var nClosed, nOK atomic.Int64
+
+		for p := 0; p < producers; p++ {
+			wg.Add(1)
+			go func() {
+				defer wg.Done()
+				for {
+					select {
+					case <-stop:
+						return
+					default:
+					}
+
+					tm, err := eng.Set(20*time.Millisecond, 1)
+
+					l := int64(eng.Len())
+					for {
+						m := minLen.Load()
+						if l >= m || minLen.CompareAndSwap(m, l) {
+							break
+						}
+					}
+					for {
+						m := maxLen.Load()
+						if l <= m || maxLen.CompareAndSwap(m, l) {
+							break
+						}
+					}
+
+					switch err {
+					case nil:
+						nOK.Add(1)
+						_ = eng.Cancel(tm)
+					case ErrClosed:
+						nClosed.Add(1)
+					}
+				}
+			}()
+		}
+
+		time.Sleep(3 * time.Millisecond)
+		eng.Close()
+		time.Sleep(1 * time.Millisecond)
+		close(stop)
+		wg.Wait()
+		<-drained
+
+		if minLen.Load() < 0 {
+			negative++
+		}
+		if maxLen.Load() > capacity {
+			overCap++
+		}
+		if nClosed.Load() > 0 {
+			sawClosed++
+		}
+		if nOK.Load() > 0 {
+			sawOK++
+		}
+
+		// 남은 타이머가 모두 만료될 때까지 수렴을 기다린다 (고정 대기 대신 폴링)
+		settled := false
+		for j := 0; j < 300; j++ {
+			if eng.Len() == 0 {
+				settled = true
+				break
+			}
+			time.Sleep(10 * time.Millisecond)
+		}
+		if !settled {
+			notSettled++
+			t.Errorf("[%d] 카운터 미수렴: Len=%d QFail=%d", i, eng.Len(), eng.QFail())
+		}
+	}
+
+	if negative > 0 {
+		t.Errorf("Len()이 음수로 관측됨: %d회 (되돌리기 이중 감소 의심)", negative)
+	}
+	if overCap > 0 {
+		t.Errorf("Len()이 정원을 초과해 관측됨: %d회", overCap)
+	}
+
+	// 두 경로가 모두 실행되지 않았다면 이 시험은 의미가 없다
+	if sawClosed == 0 || sawOK == 0 {
+		t.Logf("  [주의] 동시 실행 창을 충분히 통과하지 못함 (ErrClosed:%d회, 성공:%d회 시행)", sawClosed, sawOK)
+	}
+
+	t.Logf(" [테스트 수치]")
+	t.Logf("  - Len() 음수 관측       : %d회 (예상치: 0)", negative)
+	t.Logf("  - Len() 정원 초과 관측  : %d회 (예상치: 0)", overCap)
+	t.Logf("  - 종료 후 미수렴        : %d회 (예상치: 0)", notSettled)
+	t.Logf("  - ErrClosed 관측 시행   : %d/%d", sawClosed, trials)
+	t.Logf("  - Set 성공 관측 시행    : %d/%d", sawOK, trials)
+	t.Logf("--------------------------------------------------")
+	t.Logf(" [시험 결과] : 정상 (동시 Set/Close에서 카운터 무결성 유지)")
+	t.Logf("==================================================")
+
+	record(t, fmt.Sprintf("Concurrent Set/Close integrity (neg:%d, over:%d, unsettled:%d)", negative, overCap, notSettled))
+}

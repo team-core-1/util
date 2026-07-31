@@ -317,6 +317,28 @@ func (eng *Engine[T]) setTimer(d time.Duration, key T) (*Timer, error) {
 
 	timer.timingWheelTimer = eng.timingWheel.AfterFunc(d, timeoutFunc)
 
+	// 등록 직후 Close 여부를 재확인한다.
+	//
+	// 맨 앞의 검사와 여기 사이에 Close가 완료될 수 있는데, 그대로 두면
+	// Set은 성공(nil)과 유효한 *Timer를 반환하지만 그 타이머는 만료 시
+	// 닫힌 큐로 유입되어 QFail로만 집계되고 조용히 폐기된다.
+	//
+	// 읽기 락을 등록 구간 전체에 걸어 두지 않는 이유는, AfterFunc가 timingWheel
+	// 내부에서 길게 블록될 수 있어 그동안 쓰기 락을 기다리는 Close/Use가
+	// 함께 멈추기 때문이다. (자원이 빠듯한 환경일수록 크게 드러난다.)
+	//
+	// 되돌리는 동안 timer.mu를 쥐고 있으므로 timeoutFunc와 경합하지 않는다.
+	// 되돌린 타이머는 timingWheelTimer가 nil이라 timeoutFunc가 취소로 판정하고
+	// active를 감소시키지 않으므로, 여기서의 감소와 합쳐 정확히 1회만 감소한다.
+	eng.mu.RLock()
+	defer eng.mu.RUnlock()
+	if eng.isClosed {
+		timer.timingWheelTimer.Stop()
+		timer.timingWheelTimer = nil
+		eng.active.Add(-1)
+		return nil, ErrClosed
+	}
+
 	return timer, nil
 }
 
