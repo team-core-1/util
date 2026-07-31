@@ -10,512 +10,782 @@ import (
 	"time"
 )
 
-type myStruct struct {
-	myData [1024 * 1024 * 10]byte
+// ---------------------------------------------------------------------------
+// 결과 출력 도우미
+//
+// 각 테스트는 검증 항목을 report에 누적하고, 종료 시 통과 항목을 먼저,
+// 실패 항목을 나중에 출력한다. TestMain은 전체 요약을 같은 순서로 낸다.
+// ---------------------------------------------------------------------------
+
+const nameWidth = 28
+
+// runeWidth는 한글/한자 등 2칸을 차지하는 문자를 구분한다.
+// 이름 열 정렬이 어긋나지 않도록 하기 위함이다.
+func runeWidth(r rune) int {
+	switch {
+	case r >= 0x1100 && r <= 0x115F,
+		r >= 0x2E80 && r <= 0xA4CF,
+		r >= 0xAC00 && r <= 0xD7A3,
+		r >= 0xF900 && r <= 0xFAFF,
+		r >= 0xFF00 && r <= 0xFF60,
+		r >= 0xFFE0 && r <= 0xFFE6:
+		return 2
+	}
+	return 1
+}
+
+func padName(s string) string {
+	w := 0
+	for _, r := range s {
+		w += runeWidth(r)
+	}
+	if w >= nameWidth {
+		return s + " "
+	}
+	return s + spaces(nameWidth-w)
+}
+
+func spaces(n int) string {
+	b := make([]byte, n)
+	for i := range b {
+		b[i] = ' '
+	}
+	return string(b)
+}
+
+type checkItem struct {
+	name   string
+	detail string
+}
+
+type report struct {
+	t       *testing.T
+	purpose string
+	cond    string
+	passed  []checkItem
+	failed  []checkItem
+	notes   []string
+}
+
+type summaryEntry struct {
+	name      string
+	pass      int
+	fail      int
+	firstFail string
 }
 
 var (
-	summaryMu     sync.Mutex
-	testSummaries []string
+	summaryMu sync.Mutex
+	summaries []summaryEntry
 )
 
-func record(t *testing.T, detail string) {
-	status := "PASS"
-	if t.Failed() {
-		status = "FAIL"
+func newReport(t *testing.T, purpose, cond string) *report {
+	return &report{t: t, purpose: purpose, cond: cond}
+}
+
+// check는 ok가 참이면 통과, 거짓이면 실패로 기록하고 테스트를 실패시킨다.
+func (r *report) check(ok bool, name, passDetail, failDetail string) {
+	if ok {
+		r.passed = append(r.passed, checkItem{name, passDetail})
+		return
+	}
+	r.failed = append(r.failed, checkItem{name, failDetail})
+	r.t.Errorf("%s: %s", name, failDetail)
+}
+
+// checkErr는 에러 값이 기대와 일치하는지 확인한다.
+func (r *report) checkErr(got, want error, name, passDetail string) {
+	r.check(got == want, name, passDetail, fmt.Sprintf("%v 기대, 실제 %v", want, got))
+}
+
+// note는 단언하지 않는 참고 수치를 기록한다.
+func (r *report) note(format string, args ...any) {
+	r.notes = append(r.notes, fmt.Sprintf(format, args...))
+}
+
+func (r *report) done() {
+	t := r.t
+	t.Logf("── %s %s", t.Name(), spaces(max(0, 54-len(t.Name()))))
+	t.Logf("   목적 : %s", r.purpose)
+	t.Logf("   조건 : %s", r.cond)
+
+	if len(r.passed) > 0 {
+		t.Logf("")
+		t.Logf("   [PASS] %d건", len(r.passed))
+		for _, c := range r.passed {
+			t.Logf("     · %s%s", padName(c.name), c.detail)
+		}
+	}
+	if len(r.failed) > 0 {
+		t.Logf("")
+		t.Logf("   [FAIL] %d건", len(r.failed))
+		for _, c := range r.failed {
+			t.Logf("     · %s%s", padName(c.name), c.detail)
+		}
+	}
+	if len(r.notes) > 0 {
+		t.Logf("")
+		t.Logf("   [측정] 참고용, 단언 아님")
+		for _, n := range r.notes {
+			t.Logf("     · %s", n)
+		}
+	}
+
+	total := len(r.passed) + len(r.failed)
+	t.Logf("")
+	t.Logf("   결과 : %d/%d 통과", len(r.passed), total)
+
+	e := summaryEntry{name: t.Name(), pass: len(r.passed), fail: len(r.failed)}
+	if len(r.failed) > 0 {
+		e.firstFail = r.failed[0].name
 	}
 	summaryMu.Lock()
-	defer summaryMu.Unlock()
-	testSummaries = append(testSummaries, fmt.Sprintf("[%s] %-35s | %s", status, t.Name(), detail))
+	summaries = append(summaries, e)
+	summaryMu.Unlock()
 }
 
 func TestMain(m *testing.M) {
-	exitCode := m.Run()
-	fmt.Println("\n==========================================================================================")
-	fmt.Println("                                  ALL TESTS SUMMARY REPORT")
-	fmt.Println("==========================================================================================")
-	for _, s := range testSummaries {
-		fmt.Println(s)
-	}
-	fmt.Println("==========================================================================================")
-	os.Exit(exitCode)
-}
+	code := m.Run()
 
-func TestQueue_ConcurrencyAndMemoryCleanup(t *testing.T) {
-	const capacity = 1
-	const goroutineCount = 1000
-	const loopCount = 10
-
-	var data *myStruct
-
-	var msBefore runtime.MemStats
-	var msNew runtime.MemStats
-	var msClose runtime.MemStats
-
-	var dequeueSuccCount atomic.Uint64
-	var dequeueFailCount atomic.Uint64
-	var enqueueSuccCount atomic.Uint64
-	var enqueueFailCount atomic.Uint64
-
-	var wg sync.WaitGroup
-
-	// 초기 메모리 사용량
-	runtime.GC()
-	runtime.ReadMemStats(&msBefore)
-
-	// queue.New
-	q, err := New[*myStruct](capacity)
-	if err != nil {
-		t.Fatalf("queue 초기화 실패: %+v", err)
-	}
-
-	// 생성 후 메모리 사용량
-	runtime.GC()
-	runtime.ReadMemStats(&msNew)
-
-	startSignal := make(chan any)
-
-	// 1. 멀티 고루틴에서 C() 수신/Put 시험
-	for i := 0; i < goroutineCount; i++ {
-		// C() 수신/Put 경합 고루틴
-		wg.Add(1)
-		go func(id int) {
-			defer wg.Done()
-			<-startSignal
-
-			for j := 0; j < loopCount; j++ {
-				// C() 수신 시험
-				select {
-				case _, ok := <-q.C():
-					if !ok {
-						dequeueFailCount.Add(1)
-					} else {
-						dequeueSuccCount.Add(1)
-					}
-				default:
-					dequeueFailCount.Add(1)
-				}
-			}
-		}(i)
-
-		wg.Add(1)
-		go func(id int) {
-			defer wg.Done()
-			<-startSignal
-
-			for j := 0; j < loopCount; j++ {
-				// Put 시험
-				err := q.Put(data)
-				if err != nil {
-					enqueueFailCount.Add(1)
-					continue
-				}
-				enqueueSuccCount.Add(1)
-			}
-		}(i)
-	}
-
-	t.Logf("==================================================")
-	t.Logf(" [시험 목적 및 조건]")
-	t.Logf("  - 시험 목적 : 멀티 고루틴 Put/C() 수신 경합 및 메모리 정리 테스트")
-	t.Logf("  - 시험 조건 : Capacity:%d, 고루틴:%d개, 반복:%d회", capacity, goroutineCount*2, loopCount)
-	t.Logf("--------------------------------------------------")
-	t.Logf(" => 시험 진행 중...")
-	close(startSignal)
-
-	wg.Wait()
-
-	t.Logf("==================================================")
-	t.Logf(" [테스트 수치]")
-	t.Logf("--------------------------------------------------")
-	t.Logf(" 총 C() 수신 시도 : %d 회", goroutineCount*loopCount)
-	t.Logf("  - 성공 : %d 회", dequeueSuccCount.Load())
-	t.Logf("  - 실패 : %d 회", dequeueFailCount.Load())
-	t.Logf("--------------------------------------------------")
-	t.Logf(" 총 Put 시도 : %d 회", goroutineCount*loopCount)
-	t.Logf("  - 성공 : %d 회", enqueueSuccCount.Load())
-	t.Logf("  - 실패 : %d 회", enqueueFailCount.Load())
-
-	// queue Close
-	q.Close()
-	q = nil
-	for i := 0; i < 1; i++ {
-		runtime.GC()
-		time.Sleep(time.Microsecond * 30)
-	}
-	runtime.ReadMemStats(&msClose)
-
-	t.Logf("--------------------------------------------------")
-	t.Logf(" [메모리 수치]")
-	t.Logf("  - 메모리 사용량: %.2f MB -> %.2f MB -> %.2f MB",
-		float64(msBefore.Alloc)/(1024*1024), float64(msNew.Alloc)/(1024*1024), float64(msClose.Alloc)/(1024*1024))
-
-	t.Logf("==================================================")
-	t.Logf(" [시험 결과]")
-	if (dequeueSuccCount.Load()+dequeueFailCount.Load()) != (goroutineCount*loopCount) || (enqueueSuccCount.Load()+enqueueFailCount.Load()) != (goroutineCount*loopCount) {
-		t.Errorf("  - 입출력 시도 횟수 불일치 발생")
-	} else {
-		t.Logf("  - 입출력 시도 횟수 정합성 확인 완료")
-	}
-
-	if (int64(msClose.Alloc) - int64(msBefore.Alloc)) > (1 * 1024 * 1024) {
-		t.Errorf("  - 자원 정리 실패: Close() 이후 메모리 해제 불량 (오차 1MB 초과)")
-	} else {
-		t.Logf("  - 메모리 해제 정상 확인 (1 MB 오차 범위)")
-	}
-	t.Logf("==================================================")
-	record(t, fmt.Sprintf("Succ(Enq:%d, Deq:%d), Mem:%.2fMB->%.2fMB", enqueueSuccCount.Load(), dequeueSuccCount.Load(), float64(msBefore.Alloc)/1024/1024, float64(msClose.Alloc)/1024/1024))
-}
-
-// 1. 100개의 큐를 생성하여 Put한 값이 그대로 C()로 수신되는지 확인하는 테스트
-func TestQueue_IntegrityCheck100(t *testing.T) {
-	const count = 100
-	t.Logf("==================================================")
-	t.Logf(" [시험 목적 및 조건]")
-	t.Logf("  - 시험 목적 : 100개의 개별 큐 인스턴스 데이터 정합성 테스트")
-	t.Logf("  - 시험 조건 : 큐 개수: %d개", count)
-
-	for i := 0; i < count; i++ {
-		q, err := New[int](1)
-		if err != nil {
-			t.Fatalf("[%d] 큐 생성 실패: %v", i, err)
-		}
-
-		expected := i + 5000
-		if err := q.Put(expected); err != nil {
-			t.Errorf("[%d] Put 실패: %v", i, err)
-		}
-
-		actual, ok := <-q.C()
-		if !ok {
-			t.Errorf("[%d] C() 수신 실패: channel closed", i)
-		}
-
-		if expected != actual {
-			t.Errorf("[%d] 데이터 불일치: 예상값 %d, 실제값 %d", i, expected, actual)
+	var passList, failList []summaryEntry
+	var totalPass, totalFail int
+	for _, s := range summaries {
+		totalPass += s.pass
+		totalFail += s.fail
+		if s.fail > 0 {
+			failList = append(failList, s)
+		} else {
+			passList = append(passList, s)
 		}
 	}
-	t.Logf("--------------------------------------------------")
-	t.Logf(" [테스트 수치]")
-	t.Logf("  - 총 %d개 큐 생성 및 Put/C() 수신 정합성 검증 완료", count)
-	t.Logf(" [시험 결과] : 정상 (모든 데이터 일치)")
-	t.Logf("==================================================")
-	record(t, fmt.Sprintf("Verified %d independent queue instances", count))
+
+	line := "========================================================="
+	fmt.Println()
+	fmt.Println(line)
+	fmt.Println(" pipequeue 테스트 요약")
+	fmt.Println(line)
+
+	if len(passList) > 0 {
+		fmt.Printf(" [PASS] %d개\n", len(passList))
+		for _, s := range passList {
+			fmt.Printf("   %s%d/%d\n", padName(s.name), s.pass, s.pass+s.fail)
+		}
+	}
+	if len(failList) > 0 {
+		fmt.Printf(" [FAIL] %d개\n", len(failList))
+		for _, s := range failList {
+			fmt.Printf("   %s%d/%d    %s\n", padName(s.name), s.pass, s.pass+s.fail, s.firstFail)
+		}
+	}
+
+	fmt.Println("---------------------------------------------------------")
+	fmt.Printf(" %d개 함수 / 검증 %d항목 / 통과 %d / 실패 %d\n",
+		len(summaries), totalPass+totalFail, totalPass, totalFail)
+	fmt.Println(line)
+
+	os.Exit(code)
 }
 
-// 2. Use 메서드를 이용한 Put 실행 시간 측정 테스트
-func TestQueue_ExecutionTimeMeasurement(t *testing.T) {
-	const goroutineCount = 50
-	const loopCount = 100
-	q, _ := New[int](goroutineCount * loopCount)
-
-	var totalDuration atomic.Int64
-	var opCount atomic.Int64
-
-	// 미들웨어를 이용한 시간 측정 로직 등록
-	q.Use(func(c *Context[int]) {
-		start := time.Now()
-		c.Next() // 실제 작업(Put) 수행
-		elapsed := time.Since(start)
-
-		totalDuration.Add(int64(elapsed))
-		opCount.Add(1)
-	})
-
-	t.Logf("==================================================")
-	t.Logf(" [시험 목적 및 조건]")
-	t.Logf("  - 시험 목적 : 미들웨어를 이용한 Put 실행 시간 측정 테스트")
-	t.Logf("  - 시험 조건 : 총 고루틴: %d개, 반복: %d회", goroutineCount*2, loopCount)
-
-	var wg sync.WaitGroup
-	startSignal := make(chan struct{})
-
-	for i := 0; i < goroutineCount; i++ {
-		wg.Add(2)
-		go func() {
-			defer wg.Done()
-			<-startSignal
-			for j := 0; j < loopCount; j++ {
-				_ = q.Put(j)
-			}
-		}()
-		go func() {
-			defer wg.Done()
-			<-startSignal
-			for j := 0; j < loopCount; j++ {
-				_, _ = <-q.C()
-			}
-		}()
-	}
-
-	close(startSignal)
-	wg.Wait()
-
-	total := time.Duration(totalDuration.Load())
-	count := opCount.Load()
-	avg := time.Duration(0)
-	if count > 0 {
-		avg = time.Duration(totalDuration.Load() / count)
-	}
-
-	t.Logf("--------------------------------------------------")
-	t.Logf(" [테스트 수치]")
-	t.Logf("  - 총 작업 횟수     : %d 회", count)
-	t.Logf("  - 총 소요 시간 합계 : %v", total)
-	t.Logf("  - 평균 소요 시간    : %v", avg)
-	t.Logf("--------------------------------------------------")
-	t.Logf(" [시험 결과] : 시간 측정 완료")
-	t.Logf("==================================================")
-	record(t, fmt.Sprintf("Avg:%v, Ops:%d", avg, count))
-}
-
-// 3. 멀티 고루틴에서 사용 중 Close 호출 시 동작 확인 테스트
-func TestQueue_ConcurrentClose(t *testing.T) {
-	const capacity = 1
-	const goroutineCount = 20
-	const loopCount = 1000
-
-	q, _ := New[int](capacity)
-
-	var wg sync.WaitGroup
-	startSignal := make(chan struct{})
-
-	var enqueueSuccCount atomic.Uint64
-	var enqueueFullCount atomic.Uint64
-	var enqueueClosedCount atomic.Uint64
-	var dequeueSuccCount atomic.Uint64
-	var dequeueEmptyCount atomic.Uint64
-	var dequeueClosedCount atomic.Uint64
-
-	// Put/C() 수신을 수행하는 여러 고루틴 생성
-	for i := 0; i < goroutineCount; i++ {
-		wg.Add(2)
-		go func() {
-			defer wg.Done()
-			<-startSignal
-			for j := 0; j < loopCount; j++ {
-				err := q.Put(j)
-				if err == nil {
-					enqueueSuccCount.Add(1)
-				} else if err == ErrClosed {
-					enqueueClosedCount.Add(1)
-				} else if err == ErrFull {
-					enqueueFullCount.Add(1)
-				}
-			}
-		}()
-		go func() {
-			defer wg.Done()
-			<-startSignal
-			for j := 0; j < loopCount; j++ {
-				select {
-				case _, ok := <-q.C():
-					if ok {
-						dequeueSuccCount.Add(1)
-					} else {
-						dequeueClosedCount.Add(1)
-					}
-				default:
-					if q.IsClosed() {
-						dequeueClosedCount.Add(1)
-					} else {
-						dequeueEmptyCount.Add(1)
-					}
-				}
-			}
-		}()
-	}
-
-	close(startSignal)
-	// 작업을 잠시 진행하게 한 뒤 Close 호출
-	time.Sleep(2 * time.Millisecond)
-	q.Close()
-	wg.Wait()
-
-	t.Logf("==================================================")
-	t.Logf(" 3. 멀티 고루틴 중 Close() 테스트 통계")
-	t.Logf("--------------------------------------------------")
-	t.Logf(" 시험 조건:")
-	t.Logf("  - Capacity       : %d", capacity)
-	t.Logf("  - 총 고루틴 개수 : %d (Put:%d, C()수신:%d)", goroutineCount*2, goroutineCount, goroutineCount)
-	t.Logf("  - 고루틴당 반복  : %d 회", loopCount)
-	t.Logf("--------------------------------------------------")
-	t.Logf(" Put 통계:")
-	t.Logf("  - 총 시도 횟수   : %d 회", goroutineCount*loopCount)
-	t.Logf("  - 성공 횟수      : %d 회", enqueueSuccCount.Load())
-	t.Logf("  - ErrFull 감지   : %d 회", enqueueFullCount.Load())
-	t.Logf("  - ErrClosed 감지 : %d 회", enqueueClosedCount.Load())
-	enqueueTotalFail := enqueueFullCount.Load() + enqueueClosedCount.Load()
-	t.Logf("  - 총 실패 횟수   : %d 회 (Full + Closed)", enqueueTotalFail)
-	t.Logf("  - 합계(성공+실패): %d 회", enqueueSuccCount.Load()+enqueueTotalFail)
-
-	t.Logf(" C() 수신 통계:")
-	t.Logf("  - 총 시도 횟수   : %d 회", goroutineCount*loopCount)
-	t.Logf("  - 성공 횟수      : %d 회", dequeueSuccCount.Load())
-	t.Logf("  - 비어있음 감지 : %d 회", dequeueEmptyCount.Load())
-	t.Logf("  - ErrClosed 감지 : %d 회", dequeueClosedCount.Load())
-	dequeueTotalFail := dequeueEmptyCount.Load() + dequeueClosedCount.Load()
-	t.Logf("  - 총 실패 횟수   : %d 회 (Empty + Closed)", dequeueTotalFail)
-	t.Logf("  - 합계(성공+실패): %d 회", dequeueSuccCount.Load()+dequeueTotalFail)
-
-	t.Logf("--------------------------------------------------")
-	t.Logf(" [시험 결과] : 패닉 없이 모든 고루틴이 ErrClosed를 감지하고 안전하게 종료됨")
-	t.Logf("==================================================")
-	record(t, fmt.Sprintf("Succ(Enq:%d, Deq:%d), ClosedDetected(Enq:%d, Deq:%d)", enqueueSuccCount.Load(), dequeueSuccCount.Load(), enqueueClosedCount.Load(), dequeueClosedCount.Load()))
-}
-
-// 4. Len()이 in-flight 항목을 집계하는지 검증
-//
-// pipe 고루틴이 inCh에서 꺼냈지만 아직 C()로 전달하지 못한 항목은
-// inCh에도 outCh에도 존재하지 않는다(outCh는 무버퍼).
-// 이 구간을 집계하지 않으면 Len()이 실제보다 적게 보고되어,
-// Len()으로 정원을 계산하는 사용자(timer 등)가 용량을 초과 수용하게 된다.
-func TestQueue_LenCountsInFlight(t *testing.T) {
-	const capacity = 4
-
-	q, err := New[int](capacity)
-	if err != nil {
-		t.Fatalf("큐 생성 실패: %v", err)
-	}
-
-	// pipe 단계 진입 시점을 포착하여 in-flight 상태를 결정적으로 만든다.
-	// 수신자를 두지 않으므로 진입한 항목은 outCh 송신에서 대기한 채 머무른다.
+// enterPipe는 pipe 고루틴이 항목을 꺼내 파이프 단계에 진입한 시점을 알리는
+// 채널을 등록한다. 수신자를 두지 않으면 그 항목은 in-flight 상태로 머무른다.
+// 고정 대기(sleep) 대신 이 신호를 쓰면 타이밍에 의존하지 않는다.
+func enterPipe[T any](q *Queue[T]) <-chan struct{} {
 	entered := make(chan struct{})
 	var once sync.Once
-	q.Use(func(c *Context[int]) {
+	q.Use(func(c *Context[T]) {
 		if c.Action() == ActionPipe {
 			once.Do(func() { close(entered) })
 		}
 		c.Next()
 	})
-
-	t.Logf("==================================================")
-	t.Logf(" [시험 목적 및 조건]")
-	t.Logf("  - 시험 목적 : pipe 고루틴이 점유 중인(in-flight) 항목의 Len() 집계 검증")
-	t.Logf("  - 시험 조건 : Capacity:%d, 수신자 없음", capacity)
-	t.Logf("--------------------------------------------------")
-
-	if err := q.Put(1); err != nil {
-		t.Fatalf("Put 실패: %v", err)
-	}
-
-	select {
-	case <-entered:
-	case <-time.After(3 * time.Second):
-		t.Fatalf("pipe 단계 진입 대기 시간 초과")
-	}
-
-	// 이 시점: 항목은 inCh에서 빠졌고 아직 C()로 전달되지 않은 in-flight 상태
-	inFlightLen := q.Len()
-	if inFlightLen != 1 {
-		t.Errorf("in-flight 항목 미집계: Len()=1 기대, 실제 %d", inFlightLen)
-	}
-
-	// 버퍼에 추가로 쌓아도 총계가 정확해야 함
-	for i := 2; i <= capacity; i++ {
-		if err := q.Put(i); err != nil {
-			t.Errorf("Put(%d) 실패: %v", i, err)
-		}
-	}
-	fullLen := q.Len()
-	if fullLen != capacity {
-		t.Errorf("총계 불일치: Len()=%d 기대, 실제 %d", capacity, fullLen)
-	}
-	if fullLen > q.Cap() {
-		t.Errorf("Len()이 Cap()을 초과함: Len()=%d, Cap()=%d", fullLen, q.Cap())
-	}
-
-	// Close 시점에 pipe가 갚지 않은 감소분이 남아 있어도 음수가 되어서는 안 됨
-	q.Close()
-
-	// outCh가 닫히면 pipe 고루틴이 종료된 것 (카운터 정리 완료)
-	for range q.C() {
-	}
-
-	closedLen := q.Len()
-	if closedLen < 0 {
-		t.Errorf("Close 후 Len()이 음수: %d", closedLen)
-	}
-	if closedLen != 0 {
-		t.Errorf("Close 후 Len(): 0 기대, 실제 %d", closedLen)
-	}
-
-	t.Logf(" [테스트 수치]")
-	t.Logf("  - in-flight 1건일 때 Len() : %d (예상치: 1)", inFlightLen)
-	t.Logf("  - 정원까지 채웠을 때 Len() : %d / Cap: %d", fullLen, q.Cap())
-	t.Logf("  - Close 이후 Len()         : %d (예상치: 0)", closedLen)
-	t.Logf("--------------------------------------------------")
-	t.Logf(" [시험 결과] : 정상 (in-flight 집계 및 Close 후 카운터 정리 확인)")
-	t.Logf("==================================================")
-
-	record(t, fmt.Sprintf("InFlight:%d, Full:%d/%d, AfterClose:%d", inFlightLen, fullLen, q.Cap(), closedLen))
+	return entered
 }
 
-// 5. IsFull()과 Put()의 수용 기준이 일치하는지 검증
-//
-// IsFull()이 버퍼 길이만 보고 Put()이 총 보유량을 보면,
-// in-flight 항목이 있을 때 "안 찼다"고 답한 직후 Put이 ErrFull을 반환하게 된다.
-func TestQueue_IsFullMatchesPut(t *testing.T) {
-	const capacity = 2
-
-	q, err := New[int](capacity)
-	if err != nil {
-		t.Fatalf("큐 생성 실패: %v", err)
+func waitSignal(r *report, ch <-chan struct{}, name string) bool {
+	select {
+	case <-ch:
+		return true
+	case <-time.After(3 * time.Second):
+		r.check(false, name, "", "3초 내 pipe 단계 진입 신호 없음")
+		return false
 	}
+}
+
+// ---------------------------------------------------------------------------
+// T1. 생성과 소멸
+// ---------------------------------------------------------------------------
+
+func TestQueue_NewAndClose(t *testing.T) {
+	r := newReport(t, "New의 용량 검증과 Close 이후 상태 전이 확인", "Capacity 4, 단일 고루틴")
+	defer r.done()
+
+	_, err := New[int](0)
+	r.checkErr(err, ErrInvalidCap, "New(0)", "ErrInvalidCap")
+
+	_, err = New[int](-1)
+	r.checkErr(err, ErrInvalidCap, "New(-1)", "ErrInvalidCap")
+
+	q, err := New[int](4)
+	if err != nil {
+		t.Fatalf("New(4) 실패: %v", err)
+	}
+	r.check(q.Len() == 0 && q.Cap() == 4 && !q.IsFull() && !q.IsClosed(),
+		"생성 직후 상태", "Len=0 Cap=4 IsFull=false IsClosed=false",
+		fmt.Sprintf("Len=%d Cap=%d IsFull=%v IsClosed=%v", q.Len(), q.Cap(), q.IsFull(), q.IsClosed()))
+
+	q.Close()
+	r.check(q.IsClosed(), "Close 후 IsClosed", "true", "false")
+
+	safe := func() (ok bool) {
+		defer func() { ok = recover() == nil }()
+		q.Close()
+		q.Use(func(c *Context[int]) { c.Next() })
+		return
+	}()
+	r.check(safe, "Close 후 중복 호출", "Close/Use 모두 패닉 없음", "패닉 발생")
+}
+
+// ---------------------------------------------------------------------------
+// T2. 기본 연산 정상 경로
+// ---------------------------------------------------------------------------
+
+func TestQueue_BasicOps(t *testing.T) {
+	r := newReport(t, "Put한 데이터가 C()로 순서대로 전달되는지 확인", "Capacity 8, 소비자 1개")
+	defer r.done()
+
+	q, _ := New[int](8)
 	defer q.Close()
 
-	// 첫 항목이 in-flight 상태가 되도록 pipe 단계 진입을 기다린다.
-	entered := make(chan struct{})
-	var once sync.Once
+	const n = 8
+	received := make([]int, 0, n)
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		for i := 0; i < n; i++ {
+			received = append(received, <-q.C())
+		}
+	}()
+
+	putErr := 0
+	for i := 0; i < n; i++ {
+		if q.Put(i) != nil {
+			putErr++
+		}
+	}
+
+	select {
+	case <-done:
+	case <-time.After(3 * time.Second):
+		r.check(false, "전량 수신", "", "3초 내 수신 완료되지 않음")
+		return
+	}
+
+	ordered := true
+	for i, v := range received {
+		if v != i {
+			ordered = false
+			break
+		}
+	}
+	r.check(putErr == 0, "전량 Put", fmt.Sprintf("%d건 모두 성공", n), fmt.Sprintf("%d건 실패", putErr))
+	r.check(len(received) == n, "전량 수신", fmt.Sprintf("%d건 수신", n), fmt.Sprintf("%d건만 수신", len(received)))
+	r.check(ordered, "순서 보존", "투입 순서대로 전달됨", fmt.Sprintf("순서 어긋남: %v", received))
+
+	// 여러 큐 인스턴스가 서로 간섭하지 않아야 한다.
+	independent := true
+	for i := 0; i < 50; i++ {
+		iq, _ := New[int](1)
+		want := i + 5000
+		if iq.Put(want) != nil || <-iq.C() != want {
+			independent = false
+		}
+		iq.Close()
+	}
+	r.check(independent, "인스턴스 독립성", "50개 큐가 각자 값을 정확히 전달", "인스턴스 간 값 혼선 발생")
+}
+
+// ---------------------------------------------------------------------------
+// T3. 에러 경로 전수
+// ---------------------------------------------------------------------------
+
+func TestQueue_Errors(t *testing.T) {
+	r := newReport(t, "정의된 에러 4종이 정확한 조건에서 반환되는지", "Capacity 2, 수신자 없음")
+	defer r.done()
+
+	// New의 용량 검증은 T1에서 확인하므로 여기서는 운영 중 에러만 본다.
+	q, _ := New[int](2)
+
+	// 수신자가 없으면 pipe가 1건을 점유하고 나머지는 버퍼에 쌓인다.
+	entered := enterPipe(q)
+	r.checkErr(q.Put(1), nil, "여유 있을 때 Put", "성공")
+	if !waitSignal(r, entered, "pipe 단계 진입") {
+		return
+	}
+	r.checkErr(q.Put(2), nil, "정원까지 Put", "성공")
+	r.checkErr(q.Put(3), ErrFull, "정원 초과 Put", "ErrFull")
+
+	q.Close()
+	r.checkErr(q.Put(4), ErrClosed, "Close 후 Put", "ErrClosed")
+
+	var nilQ *Queue[int]
+	r.checkErr(nilQ.Put(1), ErrNil, "nil 큐 Put", "ErrNil")
+}
+
+// ---------------------------------------------------------------------------
+// T4. nil 리시버 안전성
+// ---------------------------------------------------------------------------
+
+func TestQueue_NilReceiver(t *testing.T) {
+	r := newReport(t, "nil 큐에 대한 모든 공개 메서드가 패닉 없이 방어되는지", "초기화하지 않은 *Queue 포인터")
+	defer r.done()
+
+	var q *Queue[int]
+
+	r.checkErr(q.Put(1), ErrNil, "Put", "ErrNil")
+	r.check(q.C() == nil, "C", "nil 채널 반환", "nil이 아닌 채널 반환")
+	r.check(q.Len() == 0 && q.Cap() == 0, "Len/Cap", "둘 다 0",
+		fmt.Sprintf("Len=%d Cap=%d", q.Len(), q.Cap()))
+	r.check(!q.IsFull(), "IsFull", "false", "true")
+	r.check(q.IsClosed(), "IsClosed", "true", "false")
+
+	safe := func() (ok bool) {
+		defer func() { ok = recover() == nil }()
+		q.Use(func(c *Context[int]) {})
+		q.Close()
+		return
+	}()
+	r.check(safe, "Use/Close", "패닉 없음", "패닉 발생")
+}
+
+// ---------------------------------------------------------------------------
+// T5. 적재량과 용량
+//
+// pipe 고루틴이 꺼내 아직 C()로 전달하지 못한 항목(in-flight)은
+// inCh에도 outCh에도 없으므로, 집계에서 빠지면 Len이 실제보다 적게 보고된다.
+// ---------------------------------------------------------------------------
+
+func TestQueue_LenCap(t *testing.T) {
+	r := newReport(t, "in-flight 항목 집계와 Close 이후 카운터 정리 확인", "Capacity 4, 수신자 없음")
+	defer r.done()
+
+	q, _ := New[int](4)
+	entered := enterPipe(q)
+
+	r.check(q.Len() == 0 && q.Cap() == 4, "초기 상태", "Len=0 Cap=4",
+		fmt.Sprintf("Len=%d Cap=%d", q.Len(), q.Cap()))
+
+	if q.Put(1) != nil {
+		t.Fatalf("Put 실패")
+	}
+	if !waitSignal(r, entered, "pipe 단계 진입") {
+		return
+	}
+
+	// 이 시점에 항목은 inCh에서 빠졌지만 아직 전달되지 않았다.
+	inFlight := q.Len()
+	r.check(inFlight == 1, "in-flight 집계", "Len=1 (버퍼에 없어도 집계됨)",
+		fmt.Sprintf("Len=%d", inFlight))
+
+	for i := 2; i <= 4; i++ {
+		if err := q.Put(i); err != nil {
+			t.Fatalf("Put(%d) 실패: %v", i, err)
+		}
+	}
+	full := q.Len()
+	r.check(full == 4 && full <= q.Cap(), "정원까지 적재", "Len=4, Cap 초과 없음",
+		fmt.Sprintf("Len=%d Cap=%d", full, q.Cap()))
+	r.check(q.IsFull(), "정원 도달 시 IsFull", "true", "false")
+
+	q.Close()
+	// outCh가 닫히면 pipe 고루틴이 종료된 것이므로 카운터 정리도 끝나 있다.
+	for range q.C() {
+	}
+	closed := q.Len()
+	r.check(closed == 0, "Close 후 카운터", "0으로 정리됨 (음수 아님)",
+		fmt.Sprintf("Len=%d", closed))
+}
+
+// ---------------------------------------------------------------------------
+// T6. IsFull과 Put의 판정 일치
+// ---------------------------------------------------------------------------
+
+func TestQueue_IsFullMatchesPut(t *testing.T) {
+	r := newReport(t, "IsFull과 Put이 같은 기준으로 수용 여부를 판정하는지", "Capacity 2, 수신자 없음")
+	defer r.done()
+
+	q, _ := New[int](2)
+	defer q.Close()
+
+	// 첫 항목이 in-flight가 되어 버퍼와 총 적재량이 어긋난 상태를 만든다.
+	entered := enterPipe(q)
+	if q.Put(0) != nil {
+		t.Fatalf("Put 실패")
+	}
+	if !waitSignal(r, entered, "pipe 단계 진입") {
+		return
+	}
+
+	mismatch := 0
+	for i := 1; i <= 3; i++ {
+		full := q.IsFull()
+		err := q.Put(i)
+		switch {
+		case full && err != ErrFull:
+			mismatch++
+		case !full && err != nil:
+			mismatch++
+		}
+	}
+	r.check(mismatch == 0, "판정 일치", "IsFull과 Put이 3개 상태에서 모두 같은 결론",
+		fmt.Sprintf("%d개 상태에서 불일치", mismatch))
+
+	r.check(q.IsFull() && q.Put(99) == ErrFull, "정원 도달 상태",
+		"IsFull=true이고 Put이 ErrFull",
+		fmt.Sprintf("IsFull=%v Put=%v", q.IsFull(), q.Put(99)))
+}
+
+// ---------------------------------------------------------------------------
+// T7. Use 미들웨어 체인
+// ---------------------------------------------------------------------------
+
+func TestQueue_Middleware(t *testing.T) {
+	r := newReport(t, "Use 체인의 단계별 실행·접근자·중단 불가 설계 확인", "Capacity 4, 소비자 1개")
+	defer r.done()
+
+	q, _ := New[int](4)
+	defer q.Close()
+
+	var putCount, pipeCount atomic.Int64
+	var order []string
+	var orderMu sync.Mutex
+
 	q.Use(func(c *Context[int]) {
-		if c.Action() == ActionPipe {
-			once.Do(func() { close(entered) })
+		if c.Action() == ActionPut {
+			orderMu.Lock()
+			order = append(order, "mw1-before")
+			orderMu.Unlock()
 		}
 		c.Next()
+		if c.Action() == ActionPut {
+			orderMu.Lock()
+			order = append(order, "mw1-after")
+			orderMu.Unlock()
+		}
+	})
+	q.Use(nil)
+	// Next를 호출하지 않는 미들웨어. 체인은 중단되지 않아야 한다.
+	q.Use(func(c *Context[int]) {
+		if c.Action() == ActionPut {
+			orderMu.Lock()
+			order = append(order, "mw2-noNext")
+			orderMu.Unlock()
+		}
 	})
 
-	t.Logf("==================================================")
-	t.Logf(" [시험 목적 및 조건]")
-	t.Logf("  - 시험 목적 : in-flight 항목이 있을 때 IsFull()과 Put()의 판정 일치 검증")
-	t.Logf("  - 시험 조건 : Capacity:%d, 수신자 없음", capacity)
-	t.Logf("--------------------------------------------------")
-
-	if err := q.Put(0); err != nil {
-		t.Fatalf("Put 실패: %v", err)
-	}
-	select {
-	case <-entered:
-	case <-time.After(3 * time.Second):
-		t.Fatalf("pipe 단계 진입 대기 시간 초과")
-	}
-
-	// 이후 상태를 바꿔 가며 두 판정이 항상 같은 결론을 내는지 확인
-	mismatch := 0
-	for i := 1; i <= capacity+1; i++ {
-		full := q.IsFull()
-		putErr := q.Put(i)
-
-		switch {
-		case full && putErr != ErrFull:
-			mismatch++
-			t.Errorf("Len()=%d: IsFull()=true 인데 Put()=%v (ErrFull 기대)", q.Len(), putErr)
-		case !full && putErr != nil:
-			mismatch++
-			t.Errorf("Len()=%d: IsFull()=false 인데 Put()=%v (성공 기대)", q.Len(), putErr)
+	// Put 단계 미들웨어는 Put을 호출한 고루틴에서 동기 실행되므로
+	// 아래 두 변수는 테스트 고루틴에서만 접근된다.
+	var putData int
+	var putErrSeen error
+	var putErrObserved bool
+	q.Use(func(c *Context[int]) {
+		switch c.Action() {
+		case ActionPut:
+			putCount.Add(1)
+			putData = c.Data()
+			c.Next()
+			putErrSeen, putErrObserved = c.Err(), true
+		case ActionPipe:
+			pipeCount.Add(1)
+			c.Next()
 		}
-		t.Logf("  - Len=%d Cap=%d : IsFull()=%-5v Put()=%v", q.Len(), q.Cap(), full, putErr)
+	})
+
+	received := make(chan int, 1)
+	go func() { received <- <-q.C() }()
+
+	err := q.Put(42)
+
+	orderMu.Lock()
+	got := append([]string(nil), order...)
+	orderMu.Unlock()
+	want := []string{"mw1-before", "mw2-noNext", "mw1-after"}
+	r.check(err == nil && equalStrings(got, want), "Put 단계 실행 순서",
+		fmt.Sprintf("%v", want), fmt.Sprintf("%v (err=%v)", got, err))
+
+	r.check(err == nil, "nil 핸들러", "건너뛰고 정상 진행", fmt.Sprintf("err=%v", err))
+	r.check(putData == 42, "Put 단계 Data 접근자", "Data=42",
+		fmt.Sprintf("Data=%d", putData))
+
+	select {
+	case v := <-received:
+		r.check(v == 42, "Next 미호출 시 종단 실행",
+			"중단되지 않고 실제 전달됨 (설계 확인)", fmt.Sprintf("수신값 %d", v))
+	case <-time.After(3 * time.Second):
+		r.check(false, "Next 미호출 시 종단 실행", "", "3초 내 전달되지 않음")
 	}
 
-	if q.Len() != capacity {
-		t.Errorf("최종 Len(): %d 기대, 실제 %d", capacity, q.Len())
+	r.check(putCount.Load() == 1 && pipeCount.Load() == 1, "Put/Pipe 양쪽 실행",
+		"등록한 미들웨어가 두 단계에서 각각 1회 실행됨",
+		fmt.Sprintf("Put %d회 Pipe %d회", putCount.Load(), pipeCount.Load()))
+
+	r.check(putErrObserved && putErrSeen == nil, "Next 이후 결과 관찰",
+		"성공한 Put의 Err이 nil로 관찰됨",
+		fmt.Sprintf("관찰 여부=%v Err=%v", putErrObserved, putErrSeen))
+}
+
+func equalStrings(a, b []string) bool {
+	if len(a) != len(b) {
+		return false
 	}
-	if !q.IsFull() {
-		t.Errorf("정원 도달 상태인데 IsFull()=false (Len=%d, Cap=%d)", q.Len(), q.Cap())
+	for i := range a {
+		if a[i] != b[i] {
+			return false
+		}
+	}
+	return true
+}
+
+// ---------------------------------------------------------------------------
+// T8. Close 의미론과 자원 정리
+//
+// Close 시 잔여 데이터를 버리는 것은 의도된 동작이다. 끝까지 전달하려면
+// 출력 채널을 비워 줄 수신자가 필요한데, 종료 시점에 수신자가 없으면
+// pipe 고루틴이 송신 지점에서 영원히 대기하며 누수되기 때문이다.
+// ---------------------------------------------------------------------------
+
+func TestQueue_CloseSemantics(t *testing.T) {
+	r := newReport(t, "Close의 잔여 데이터 폐기와 고루틴 정리 확인", "Capacity 4, 수신자 없음")
+	defer r.done()
+
+	runtime.GC()
+	base := runtime.NumGoroutine()
+
+	q, _ := New[int](4)
+	afterNew := runtime.NumGoroutine()
+	r.check(afterNew > base, "New의 pipe 고루틴", "생성 시 내부 고루틴 1개 기동",
+		fmt.Sprintf("고루틴 수 변화 없음 (%d)", base))
+
+	accepted := 0
+	for i := 0; i < 4; i++ {
+		if q.Put(i) == nil {
+			accepted++
+		}
+	}
+	r.check(accepted == 4, "Close 이전 적재", "4건 모두 Put 성공",
+		fmt.Sprintf("%d건만 성공", accepted))
+
+	q.Close()
+
+	// outCh가 닫힐 때까지 수신하면 pipe 고루틴 종료를 확정할 수 있다.
+	drained := 0
+	for range q.C() {
+		drained++
+	}
+	r.check(drained < accepted, "잔여 데이터 폐기",
+		fmt.Sprintf("Put 4건 중 %d건만 전달되고 나머지는 폐기됨 (의도된 동작)", drained),
+		fmt.Sprintf("%d건이 모두 전달됨", drained))
+
+	r.check(q.IsClosed() && q.Put(9) == ErrClosed, "Close 후 Put 차단",
+		"IsClosed=true, Put은 ErrClosed", "차단되지 않음")
+
+	// 고루틴이 실제로 회수되었는지 확인한다.
+	settled := false
+	for i := 0; i < 100; i++ {
+		if runtime.NumGoroutine() <= base {
+			settled = true
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	r.check(settled, "Close 후 고루틴 회수",
+		fmt.Sprintf("기준선 %d개로 복귀", base),
+		fmt.Sprintf("기준선 %d개, 현재 %d개", base, runtime.NumGoroutine()))
+}
+
+// ---------------------------------------------------------------------------
+// T9. 동시성 안전성 및 처리 성능
+//
+// 1단계는 Capacity 1로 정원 경계를 최대한 압박하며 안전성만 본다.
+// 2단계는 소비자를 두어 연산이 실제로 성공하는 조건에서 처리량을 측정한다.
+// 성능 수치는 머신 사양에 좌우되므로 단언하지 않고 참고로만 출력한다.
+// ---------------------------------------------------------------------------
+
+func TestQueue_Concurrency(t *testing.T) {
+	r := newReport(t,
+		"멀티 고루틴 경합 안전성(1단계)과 처리 성능(2단계) 확인",
+		"1단계 Capacity 1 + 중간 Close / 2단계 Capacity 충분")
+	defer r.done()
+
+	concurrencyStress(t, r)
+	concurrencyPerf(t, r)
+}
+
+// 1단계: Capacity 1, 극한 경합 + 경합 중 Close. 안전성만 검증한다.
+func concurrencyStress(t *testing.T, r *report) {
+	const producers = 100
+	const loops = 300
+
+	q, _ := New[int](1)
+
+	var putOK, putFull, putClosed atomic.Uint64
+	var unexpected atomic.Uint64
+	var receivedCnt atomic.Uint64
+
+	// 소비자는 채널이 닫힐 때까지 계속 받는다.
+	consumerDone := make(chan struct{})
+	go func() {
+		defer close(consumerDone)
+		for range q.C() {
+			receivedCnt.Add(1)
+		}
+	}()
+
+	var wg sync.WaitGroup
+	start := make(chan struct{})
+	for p := 0; p < producers; p++ {
+		wg.Add(1)
+		go func(p int) {
+			defer wg.Done()
+			<-start
+			for j := 0; j < loops; j++ {
+				switch err := q.Put(p*loops + j); err {
+				case nil:
+					putOK.Add(1)
+				case ErrFull:
+					putFull.Add(1)
+				case ErrClosed:
+					putClosed.Add(1)
+				default:
+					unexpected.Add(1)
+				}
+			}
+		}(p)
 	}
 
-	t.Logf("--------------------------------------------------")
-	t.Logf(" [시험 결과] : 정상 (불일치 %d건)", mismatch)
-	t.Logf("==================================================")
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		<-start
+		time.Sleep(2 * time.Millisecond)
+		q.Close()
+	}()
 
-	record(t, fmt.Sprintf("IsFull/Put agreement verified (mismatch:%d)", mismatch))
+	begin := time.Now()
+	close(start)
+
+	finished := make(chan struct{})
+	go func() { wg.Wait(); close(finished) }()
+
+	select {
+	case <-finished:
+		r.check(true, "1단계 완주",
+			fmt.Sprintf("패닉·데드락 없이 %v 내 완료", time.Since(begin).Round(time.Millisecond)), "")
+	case <-time.After(60 * time.Second):
+		r.check(false, "1단계 완주", "", "60초 내 완료되지 않음 (데드락 의심)")
+		return
+	}
+
+	<-consumerDone
+
+	expected := uint64(producers * loops)
+	total := putOK.Load() + putFull.Load() + putClosed.Load()
+	r.check(total == expected, "1단계 시도 횟수 정합성",
+		fmt.Sprintf("Put %d건이 누락 없이 분류됨", expected),
+		fmt.Sprintf("분류 합계 %d (기대 %d)", total, expected))
+
+	r.check(unexpected.Load() == 0, "1단계 예상 외 에러", "없음 (Full/Closed만 발생)",
+		fmt.Sprintf("%d건 발생", unexpected.Load()))
+
+	r.check(q.IsClosed() && putClosed.Load() > 0, "1단계 Close 반영",
+		fmt.Sprintf("경합 중 Close 이후 %d건이 ErrClosed로 거부됨", putClosed.Load()),
+		fmt.Sprintf("IsClosed=%v, ErrClosed 관측 %d건", q.IsClosed(), putClosed.Load()))
+
+	// Close로 폐기되는 항목이 있으므로 수신 수는 성공 수 이하다.
+	r.check(receivedCnt.Load() <= putOK.Load(), "1단계 수신/성공 관계",
+		fmt.Sprintf("성공 %d건 중 %d건 수신 (나머지는 Close로 폐기)", putOK.Load(), receivedCnt.Load()),
+		fmt.Sprintf("수신 %d건이 성공 %d건을 초과", receivedCnt.Load(), putOK.Load()))
+
+	r.check(q.Len() == 0, "1단계 종료 후 카운터", "0으로 정리됨", fmt.Sprintf("Len=%d", q.Len()))
+
+	r.note("1단계  Capacity 1, 생산자 %d개, 총 %d회 Put, 소요 %v",
+		producers, expected, time.Since(begin).Round(time.Millisecond))
+}
+
+// 2단계: 소비자를 두어 실제로 전달이 성사되는 조건에서 처리량을 측정한다.
+func concurrencyPerf(t *testing.T, r *report) {
+	const producers = 8
+	const loops = 5000
+	const total = producers * loops
+
+	measure := func(q *Queue[int]) (time.Duration, uint64) {
+		var received atomic.Uint64
+		consumerDone := make(chan struct{})
+		go func() {
+			defer close(consumerDone)
+			for range q.C() {
+				received.Add(1)
+			}
+		}()
+
+		var wg sync.WaitGroup
+		start := make(chan struct{})
+		for p := 0; p < producers; p++ {
+			wg.Add(1)
+			go func(p int) {
+				defer wg.Done()
+				<-start
+				for j := 0; j < loops; j++ {
+					// 정원이 넉넉해도 소비 속도에 따라 일시적으로 찰 수 있어 재시도한다.
+					for q.Put(p*loops+j) == ErrFull {
+						runtime.Gosched()
+					}
+				}
+			}(p)
+		}
+		begin := time.Now()
+		close(start)
+		wg.Wait()
+		d := time.Since(begin)
+		q.Close()
+		<-consumerDone
+		return d, received.Load()
+	}
+
+	// 워밍업: 첫 측정이 런타임/스케줄러 예열 비용을 떠안지 않도록 한다.
+	warm, _ := New[int](1024)
+	_, _ = measure(warm)
+
+	plain, _ := New[int](1024)
+	plainDur, plainRecv := measure(plain)
+
+	mw, _ := New[int](1024)
+	for i := 0; i < 3; i++ {
+		mw.Use(func(c *Context[int]) { c.Next() })
+	}
+	mwDur, _ := measure(mw)
+
+	r.check(plainRecv > 0 && plainRecv <= total, "2단계 전달 성사",
+		fmt.Sprintf("%d건 Put 중 %d건 전달 확인", total, plainRecv),
+		fmt.Sprintf("전달 %d건 (기대 1..%d)", plainRecv, total))
+
+	perOp := func(d time.Duration) string {
+		return fmt.Sprintf("평균 %v", (d / total).Round(time.Nanosecond))
+	}
+	throughput := func(d time.Duration) string {
+		if d == 0 {
+			return "-"
+		}
+		return fmt.Sprintf("%.2fM ops/s", float64(total)/d.Seconds()/1e6)
+	}
+
+	overhead := ""
+	if plainDur > 0 {
+		overhead = fmt.Sprintf(" (%+.1f%%)", (float64(mwDur)/float64(plainDur)-1)*100)
+	}
+
+	r.note("2단계  Capacity 1024, 생산자 %d개, 총 %d회 Put", producers, total)
+	r.note("Put→C() %-16s %s", perOp(plainDur), throughput(plainDur))
+	r.note("미들웨어 0개 → 3개  %v → %v%s",
+		(plainDur / total).Round(time.Nanosecond), (mwDur / total).Round(time.Nanosecond), overhead)
+	r.note("(-race 실행 시 위 수치는 수 배 부풀려짐)")
 }
