@@ -2,191 +2,19 @@ package timer
 
 import (
 	"fmt"
-	"os"
 	"runtime"
 	"sync"
 	"sync/atomic"
 	"testing"
+
 	"time"
+
+	"github.com/team-core-1/util/internal/testreport"
 
 	"github.com/RussellLuo/timingwheel"
 )
 
-// ---------------------------------------------------------------------------
-// 결과 출력 도우미
-//
-// 각 테스트는 검증 항목을 report에 누적하고, 종료 시 통과 항목을 먼저,
-// 실패 항목을 나중에 출력한다. TestMain은 전체 요약을 같은 순서로 낸다.
-// ---------------------------------------------------------------------------
-
-const nameWidth = 28
-
-// runeWidth는 한글/한자 등 2칸을 차지하는 문자를 구분한다.
-// 이름 열 정렬이 어긋나지 않도록 하기 위함이다.
-func runeWidth(r rune) int {
-	switch {
-	case r >= 0x1100 && r <= 0x115F,
-		r >= 0x2E80 && r <= 0xA4CF,
-		r >= 0xAC00 && r <= 0xD7A3,
-		r >= 0xF900 && r <= 0xFAFF,
-		r >= 0xFF00 && r <= 0xFF60,
-		r >= 0xFFE0 && r <= 0xFFE6:
-		return 2
-	}
-	return 1
-}
-
-func padName(s string) string {
-	w := 0
-	for _, r := range s {
-		w += runeWidth(r)
-	}
-	if w >= nameWidth {
-		return s + " "
-	}
-	return s + spaces(nameWidth-w)
-}
-
-func spaces(n int) string {
-	b := make([]byte, n)
-	for i := range b {
-		b[i] = ' '
-	}
-	return string(b)
-}
-
-type checkItem struct {
-	name   string
-	detail string
-}
-
-type report struct {
-	t       *testing.T
-	purpose string
-	cond    string
-	passed  []checkItem
-	failed  []checkItem
-	notes   []string
-}
-
-type summaryEntry struct {
-	name      string
-	pass      int
-	fail      int
-	firstFail string
-}
-
-var (
-	summaryMu sync.Mutex
-	summaries []summaryEntry
-)
-
-func newReport(t *testing.T, purpose, cond string) *report {
-	return &report{t: t, purpose: purpose, cond: cond}
-}
-
-// check는 ok가 참이면 통과, 거짓이면 실패로 기록하고 테스트를 실패시킨다.
-func (r *report) check(ok bool, name, passDetail, failDetail string) {
-	if ok {
-		r.passed = append(r.passed, checkItem{name, passDetail})
-		return
-	}
-	r.failed = append(r.failed, checkItem{name, failDetail})
-	r.t.Errorf("%s: %s", name, failDetail)
-}
-
-// checkErr는 에러 값이 기대와 일치하는지 확인한다.
-func (r *report) checkErr(got, want error, name, passDetail string) {
-	r.check(got == want, name, passDetail, fmt.Sprintf("%v 기대, 실제 %v", want, got))
-}
-
-// note는 단언하지 않는 참고 수치를 기록한다.
-func (r *report) note(format string, args ...any) {
-	r.notes = append(r.notes, fmt.Sprintf(format, args...))
-}
-
-func (r *report) done() {
-	t := r.t
-	t.Logf("── %s %s", t.Name(), spaces(max(0, 54-len(t.Name()))))
-	t.Logf("   목적 : %s", r.purpose)
-	t.Logf("   조건 : %s", r.cond)
-
-	if len(r.passed) > 0 {
-		t.Logf("")
-		t.Logf("   [PASS] %d건", len(r.passed))
-		for _, c := range r.passed {
-			t.Logf("     · %s%s", padName(c.name), c.detail)
-		}
-	}
-	if len(r.failed) > 0 {
-		t.Logf("")
-		t.Logf("   [FAIL] %d건", len(r.failed))
-		for _, c := range r.failed {
-			t.Logf("     · %s%s", padName(c.name), c.detail)
-		}
-	}
-	if len(r.notes) > 0 {
-		t.Logf("")
-		t.Logf("   [측정] 참고용, 단언 아님")
-		for _, n := range r.notes {
-			t.Logf("     · %s", n)
-		}
-	}
-
-	total := len(r.passed) + len(r.failed)
-	t.Logf("")
-	t.Logf("   결과 : %d/%d 통과", len(r.passed), total)
-
-	e := summaryEntry{name: t.Name(), pass: len(r.passed), fail: len(r.failed)}
-	if len(r.failed) > 0 {
-		e.firstFail = r.failed[0].name
-	}
-	summaryMu.Lock()
-	summaries = append(summaries, e)
-	summaryMu.Unlock()
-}
-
-func TestMain(m *testing.M) {
-	code := m.Run()
-
-	var passList, failList []summaryEntry
-	var totalPass, totalFail int
-	for _, s := range summaries {
-		totalPass += s.pass
-		totalFail += s.fail
-		if s.fail > 0 {
-			failList = append(failList, s)
-		} else {
-			passList = append(passList, s)
-		}
-	}
-
-	line := "========================================================="
-	fmt.Println()
-	fmt.Println(line)
-	fmt.Println(" timer 테스트 요약")
-	fmt.Println(line)
-
-	if len(passList) > 0 {
-		fmt.Printf(" [PASS] %d개\n", len(passList))
-		for _, s := range passList {
-			fmt.Printf("   %s%d/%d\n", padName(s.name), s.pass, s.pass+s.fail)
-		}
-	}
-	if len(failList) > 0 {
-		fmt.Printf(" [FAIL] %d개\n", len(failList))
-		for _, s := range failList {
-			fmt.Printf("   %s%d/%d    %s\n", padName(s.name), s.pass, s.pass+s.fail, s.firstFail)
-		}
-	}
-
-	fmt.Println("---------------------------------------------------------")
-	fmt.Printf(" %d개 함수 / 검증 %d항목 / 통과 %d / 실패 %d\n",
-		len(summaries), totalPass+totalFail, totalPass, totalFail)
-	fmt.Println(line)
-
-	os.Exit(code)
-}
+func TestMain(m *testing.M) { testreport.Main(m, "timer") }
 
 // ---------------------------------------------------------------------------
 // 공통 도우미
@@ -227,30 +55,30 @@ func drain[T any](eng *Engine[T], counter *atomic.Uint64) func() {
 // ---------------------------------------------------------------------------
 
 func TestTimer_NewAndClose(t *testing.T) {
-	r := newReport(t, "New의 인자 검증과 Close 이후 상태 전이 확인", "tick 10ms, wheelSize 20, Capacity 10")
-	defer r.done()
+	r := testreport.New(t, "New의 인자 검증과 Close 이후 상태 전이 확인", "tick 10ms, wheelSize 20, Capacity 10")
+	defer r.Done()
 
 	_, err := New[int](nil, 10)
-	r.checkErr(err, ErrNilTimingWheel, "New(nil 휠)", "ErrNilTimingWheel")
+	r.CheckErr(err, ErrNilTimingWheel, "New(nil 휠)", "ErrNilTimingWheel")
 
 	tw := newWheel(t)
 
 	_, err = New[int](tw, 0)
-	r.checkErr(err, ErrInvalidCap, "New(cap 0)", "ErrInvalidCap")
+	r.CheckErr(err, ErrInvalidCap, "New(cap 0)", "ErrInvalidCap")
 
 	_, err = New[int](tw, -1)
-	r.checkErr(err, ErrInvalidCap, "New(cap -1)", "ErrInvalidCap")
+	r.CheckErr(err, ErrInvalidCap, "New(cap -1)", "ErrInvalidCap")
 
 	eng, err := New[int](tw, 10)
 	if err != nil {
 		t.Fatalf("New 실패: %v", err)
 	}
-	r.check(eng.Len() == 0 && eng.Cap() == 10 && !eng.IsClosed() && eng.QFail() == 0,
+	r.Check(eng.Len() == 0 && eng.Cap() == 10 && !eng.IsClosed() && eng.QFail() == 0,
 		"생성 직후 상태", "Len=0 Cap=10 IsClosed=false QFail=0",
 		fmt.Sprintf("Len=%d Cap=%d IsClosed=%v QFail=%d", eng.Len(), eng.Cap(), eng.IsClosed(), eng.QFail()))
 
 	eng.Close()
-	r.check(eng.IsClosed(), "Close 후 IsClosed", "true", "false")
+	r.Check(eng.IsClosed(), "Close 후 IsClosed", "true", "false")
 
 	safe := func() (ok bool) {
 		defer func() { ok = recover() == nil }()
@@ -258,7 +86,7 @@ func TestTimer_NewAndClose(t *testing.T) {
 		eng.Use(func(c *Context[int]) { c.Next() })
 		return
 	}()
-	r.check(safe, "Close 후 중복 호출", "Close/Use 모두 패닉 없음", "패닉 발생")
+	r.Check(safe, "Close 후 중복 호출", "Close/Use 모두 패닉 없음", "패닉 발생")
 }
 
 // ---------------------------------------------------------------------------
@@ -266,8 +94,8 @@ func TestTimer_NewAndClose(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 func TestTimer_BasicOps(t *testing.T) {
-	r := newReport(t, "Set한 타이머가 만료되어 C()로 전달되고 Cancel이 이를 막는지", "Capacity 10, 소비자 1개")
-	defer r.done()
+	r := testreport.New(t, "Set한 타이머가 만료되어 C()로 전달되고 Cancel이 이를 막는지", "Capacity 10, 소비자 1개")
+	defer r.Done()
 
 	tw := newWheel(t)
 	eng, _ := New[int](tw, 10)
@@ -275,29 +103,29 @@ func TestTimer_BasicOps(t *testing.T) {
 
 	tm, err := eng.Set(2*tick, 100)
 	// *Timer를 %v로 출력하면 리플렉션이 내부 필드를 읽어 만료 고루틴과 경합한다.
-	r.check(err == nil && tm != nil, "Set 반환", "nil 에러와 유효한 Timer",
+	r.Check(err == nil && tm != nil, "Set 반환", "nil 에러와 유효한 Timer",
 		fmt.Sprintf("err=%v timer!=nil=%v", err, tm != nil))
 
 	select {
 	case key := <-eng.C():
-		r.check(key == 100, "만료 키 전달", "Set한 키 100이 그대로 전달됨",
+		r.Check(key == 100, "만료 키 전달", "Set한 키 100이 그대로 전달됨",
 			fmt.Sprintf("수신 키=%d", key))
 	case <-time.After(waitTimeout):
-		r.check(false, "만료 키 전달", "", "제한 시간 내 수신되지 않음")
+		r.Check(false, "만료 키 전달", "", "제한 시간 내 수신되지 않음")
 	}
 
 	// 취소한 타이머는 만료되지 않아야 한다.
 	tm2, _ := eng.Set(2*tick, 200)
-	r.checkErr(eng.Cancel(tm2), nil, "Cancel 반환", "성공")
+	r.CheckErr(eng.Cancel(tm2), nil, "Cancel 반환", "성공")
 
 	select {
 	case key := <-eng.C():
-		r.check(false, "취소 후 미전달", "", fmt.Sprintf("취소했는데 키 %d가 전달됨", key))
+		r.Check(false, "취소 후 미전달", "", fmt.Sprintf("취소했는데 키 %d가 전달됨", key))
 	case <-time.After(10 * tick):
-		r.check(true, "취소 후 미전달", "만료 시간이 지나도 전달되지 않음", "")
+		r.Check(true, "취소 후 미전달", "만료 시간이 지나도 전달되지 않음", "")
 	}
 
-	r.check(eng.Len() == 0, "정리 후 잔여", "Len=0", fmt.Sprintf("Len=%d", eng.Len()))
+	r.Check(eng.Len() == 0, "정리 후 잔여", "Len=0", fmt.Sprintf("Len=%d", eng.Len()))
 }
 
 // ---------------------------------------------------------------------------
@@ -305,34 +133,34 @@ func TestTimer_BasicOps(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 func TestTimer_Errors(t *testing.T) {
-	r := newReport(t, "정의된 에러가 정확한 조건에서 반환되는지", "Capacity 2, 만료되지 않는 타이머 사용")
-	defer r.done()
+	r := testreport.New(t, "정의된 에러가 정확한 조건에서 반환되는지", "Capacity 2, 만료되지 않는 타이머 사용")
+	defer r.Done()
 
 	tw := newWheel(t)
 	eng, _ := New[int](tw, 2)
 
 	var nilEng *Engine[int]
 	_, err := nilEng.Set(neverFire, 1)
-	r.checkErr(err, ErrNil, "nil 엔진 Set", "ErrNil")
-	r.checkErr(nilEng.Cancel(&Timer{}), ErrNil, "nil 엔진 Cancel", "ErrNil")
-	r.checkErr(eng.Cancel(nil), ErrNilTimer, "nil Timer Cancel", "ErrNilTimer")
+	r.CheckErr(err, ErrNil, "nil 엔진 Set", "ErrNil")
+	r.CheckErr(nilEng.Cancel(&Timer{}), ErrNil, "nil 엔진 Cancel", "ErrNil")
+	r.CheckErr(eng.Cancel(nil), ErrNilTimer, "nil Timer Cancel", "ErrNilTimer")
 
 	tm1, e1 := eng.Set(neverFire, 1)
 	_, e2 := eng.Set(neverFire, 2)
 	_, e3 := eng.Set(neverFire, 3)
-	r.check(e1 == nil && e2 == nil && e3 == ErrExpiredQueueFull, "정원 초과 Set",
+	r.Check(e1 == nil && e2 == nil && e3 == ErrExpiredQueueFull, "정원 초과 Set",
 		"정원까지 성공, 초과분은 ErrExpiredQueueFull",
 		fmt.Sprintf("1=%v 2=%v 3=%v", e1, e2, e3))
 
-	r.checkErr(eng.Cancel(tm1), nil, "정상 Cancel", "성공")
-	r.checkErr(eng.Cancel(tm1), ErrAlreadyCancelled, "중복 Cancel", "ErrAlreadyCancelled")
+	r.CheckErr(eng.Cancel(tm1), nil, "정상 Cancel", "성공")
+	r.CheckErr(eng.Cancel(tm1), ErrAlreadyCancelled, "중복 Cancel", "ErrAlreadyCancelled")
 
 	// 엔진이 발급하지 않은 Timer는 소유권 검사에서 걸러진다.
-	r.checkErr(eng.Cancel(&Timer{}), ErrNotOwner, "직접 생성한 Timer Cancel", "ErrNotOwner")
+	r.CheckErr(eng.Cancel(&Timer{}), ErrNotOwner, "직접 생성한 Timer Cancel", "ErrNotOwner")
 
 	eng.Close()
 	_, err = eng.Set(neverFire, 9)
-	r.checkErr(err, ErrClosed, "Close 후 Set", "ErrClosed")
+	r.CheckErr(err, ErrClosed, "Close 후 Set", "ErrClosed")
 }
 
 // ---------------------------------------------------------------------------
@@ -340,20 +168,20 @@ func TestTimer_Errors(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 func TestTimer_NilReceiver(t *testing.T) {
-	r := newReport(t, "nil 엔진에 대한 모든 공개 메서드가 패닉 없이 방어되는지", "초기화하지 않은 *Engine 포인터")
-	defer r.done()
+	r := testreport.New(t, "nil 엔진에 대한 모든 공개 메서드가 패닉 없이 방어되는지", "초기화하지 않은 *Engine 포인터")
+	defer r.Done()
 
 	var eng *Engine[int]
 
 	tm, err := eng.Set(neverFire, 1)
-	r.check(err == ErrNil && tm == nil, "Set", "ErrNil, nil Timer 반환",
+	r.Check(err == ErrNil && tm == nil, "Set", "ErrNil, nil Timer 반환",
 		fmt.Sprintf("err=%v timer==nil=%v", err, tm == nil))
 
-	r.checkErr(eng.Cancel(&Timer{}), ErrNil, "Cancel", "ErrNil")
-	r.check(eng.C() == nil, "C", "nil 채널 반환", "nil이 아닌 채널 반환")
-	r.check(eng.Len() == 0 && eng.Cap() == 0 && eng.QFail() == 0, "Len/Cap/QFail", "모두 0",
+	r.CheckErr(eng.Cancel(&Timer{}), ErrNil, "Cancel", "ErrNil")
+	r.Check(eng.C() == nil, "C", "nil 채널 반환", "nil이 아닌 채널 반환")
+	r.Check(eng.Len() == 0 && eng.Cap() == 0 && eng.QFail() == 0, "Len/Cap/QFail", "모두 0",
 		fmt.Sprintf("Len=%d Cap=%d QFail=%d", eng.Len(), eng.Cap(), eng.QFail()))
-	r.check(eng.IsClosed(), "IsClosed", "true", "false")
+	r.Check(eng.IsClosed(), "IsClosed", "true", "false")
 
 	safe := func() (ok bool) {
 		defer func() { ok = recover() == nil }()
@@ -361,7 +189,7 @@ func TestTimer_NilReceiver(t *testing.T) {
 		eng.Close()
 		return
 	}()
-	r.check(safe, "Use/Close", "패닉 없음", "패닉 발생")
+	r.Check(safe, "Use/Close", "패닉 없음", "패닉 발생")
 }
 
 // ---------------------------------------------------------------------------
@@ -369,14 +197,14 @@ func TestTimer_NilReceiver(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 func TestTimer_LenCap(t *testing.T) {
-	r := newReport(t, "Set/Cancel/만료에 따른 Len 변화와 정원 관리 확인", "Capacity 3, 만료되지 않는 타이머 사용")
-	defer r.done()
+	r := testreport.New(t, "Set/Cancel/만료에 따른 Len 변화와 정원 관리 확인", "Capacity 3, 만료되지 않는 타이머 사용")
+	defer r.Done()
 
 	tw := newWheel(t)
 	eng, _ := New[int](tw, 3)
 	defer eng.Close()
 
-	r.check(eng.Len() == 0 && eng.Cap() == 3, "초기 상태", "Len=0 Cap=3",
+	r.Check(eng.Len() == 0 && eng.Cap() == 3, "초기 상태", "Len=0 Cap=3",
 		fmt.Sprintf("Len=%d Cap=%d", eng.Len(), eng.Cap()))
 
 	timers := make([]*Timer, 0, 3)
@@ -387,17 +215,17 @@ func TestTimer_LenCap(t *testing.T) {
 		}
 		timers = append(timers, tm)
 	}
-	r.check(eng.Len() == 3, "정원까지 Set", "Len=3", fmt.Sprintf("Len=%d", eng.Len()))
+	r.Check(eng.Len() == 3, "정원까지 Set", "Len=3", fmt.Sprintf("Len=%d", eng.Len()))
 
 	_, err := eng.Set(neverFire, 99)
-	r.checkErr(err, ErrExpiredQueueFull, "정원 도달 후 Set", "ErrExpiredQueueFull")
+	r.CheckErr(err, ErrExpiredQueueFull, "정원 도달 후 Set", "ErrExpiredQueueFull")
 
 	_ = eng.Cancel(timers[0])
-	r.check(eng.Len() == 2, "Cancel 후", "Len=2", fmt.Sprintf("Len=%d", eng.Len()))
+	r.Check(eng.Len() == 2, "Cancel 후", "Len=2", fmt.Sprintf("Len=%d", eng.Len()))
 
 	// 취소로 확보된 자리를 다시 쓸 수 있어야 한다.
 	tm, err := eng.Set(neverFire, 100)
-	r.check(err == nil && eng.Len() == 3, "취소 자리 재사용", "Set 성공, Len=3",
+	r.Check(err == nil && eng.Len() == 3, "취소 자리 재사용", "Set 성공, Len=3",
 		fmt.Sprintf("err=%v Len=%d", err, eng.Len()))
 	if tm != nil {
 		_ = eng.Cancel(tm)
@@ -420,7 +248,7 @@ func TestTimer_LenCap(t *testing.T) {
 		}
 		time.Sleep(10 * time.Millisecond)
 	}
-	r.check(settled, "만료 후 자리 반납", "전달 완료 후 Len=0으로 복귀",
+	r.Check(settled, "만료 후 자리 반납", "전달 완료 후 Len=0으로 복귀",
 		fmt.Sprintf("수신 %d건, Len=%d", received.Load(), eng.Len()))
 	eng.Close()
 	stop()
@@ -434,8 +262,8 @@ func TestTimer_LenCap(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 func TestTimer_CancelOwnership(t *testing.T) {
-	r := newReport(t, "타 엔진이 발급한 Timer의 Cancel 차단과 카운터 무결성 확인", "같은 timingWheel을 공유하는 엔진 2개, Capacity 2")
-	defer r.done()
+	r := testreport.New(t, "타 엔진이 발급한 Timer의 Cancel 차단과 카운터 무결성 확인", "같은 timingWheel을 공유하는 엔진 2개, Capacity 2")
+	defer r.Done()
 
 	tw := newWheel(t)
 	engA, _ := New[int](tw, 2)
@@ -448,20 +276,20 @@ func TestTimer_CancelOwnership(t *testing.T) {
 		t.Fatalf("B.Set 실패: %v", err)
 	}
 
-	r.checkErr(engA.Cancel(tmB), ErrNotOwner, "타 엔진 Timer Cancel", "ErrNotOwner")
-	r.check(engA.Len() == 0, "거부 후 요청 측 카운터", "Len=0 (음수 아님)",
+	r.CheckErr(engA.Cancel(tmB), ErrNotOwner, "타 엔진 Timer Cancel", "ErrNotOwner")
+	r.Check(engA.Len() == 0, "거부 후 요청 측 카운터", "Len=0 (음수 아님)",
 		fmt.Sprintf("Len=%d", engA.Len()))
-	r.check(engB.Len() == 1, "거부 후 소유 측 카운터", "Len=1 (취소되지 않음)",
+	r.Check(engB.Len() == 1, "거부 후 소유 측 카운터", "Len=1 (취소되지 않음)",
 		fmt.Sprintf("Len=%d", engB.Len()))
 
 	// 타입이 다른 엔진도 차단되어야 한다.
 	engStr, _ := New[string](tw, 2)
 	defer engStr.Close()
-	r.checkErr(engStr.Cancel(tmB), ErrNotOwner, "타입이 다른 엔진 Cancel", "ErrNotOwner")
+	r.CheckErr(engStr.Cancel(tmB), ErrNotOwner, "타입이 다른 엔진 Cancel", "ErrNotOwner")
 
 	// 소유권 검사가 중복 취소 검사보다 먼저 수행된다.
-	r.checkErr(engB.Cancel(tmB), nil, "소유 엔진 Cancel", "성공")
-	r.checkErr(engA.Cancel(tmB), ErrNotOwner, "이미 취소된 타 엔진 Timer",
+	r.CheckErr(engB.Cancel(tmB), nil, "소유 엔진 Cancel", "성공")
+	r.CheckErr(engA.Cancel(tmB), ErrNotOwner, "이미 취소된 타 엔진 Timer",
 		"ErrNotOwner (소유권 검사 우선)")
 
 	// 취소로 반납된 자리를 다시 쓸 수 있어야 한다 (정원 잠식 없음)
@@ -471,7 +299,7 @@ func TestTimer_CancelOwnership(t *testing.T) {
 			reuse = false
 		}
 	}
-	r.check(reuse && engB.Len() == 2, "취소 후 정원 재사용", "Capacity 2를 모두 다시 사용 가능",
+	r.Check(reuse && engB.Len() == 2, "취소 후 정원 재사용", "Capacity 2를 모두 다시 사용 가능",
 		fmt.Sprintf("재사용=%v Len=%d", reuse, engB.Len()))
 }
 
@@ -480,8 +308,8 @@ func TestTimer_CancelOwnership(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 func TestTimer_Middleware(t *testing.T) {
-	r := newReport(t, "Use 체인의 단계별 실행·접근자·중단 불가 설계 확인", "Capacity 10, 미들웨어 3개(nil 포함)")
-	defer r.done()
+	r := testreport.New(t, "Use 체인의 단계별 실행·접근자·중단 불가 설계 확인", "Capacity 10, 미들웨어 3개(nil 포함)")
+	defer r.Done()
 
 	tw := newWheel(t)
 	eng, _ := New[int](tw, 10)
@@ -545,44 +373,44 @@ func TestTimer_Middleware(t *testing.T) {
 	})
 
 	tm, err := eng.Set(2*tick, 42)
-	r.check(setAct == ActionSet && setKey == 42, "Set 단계 접근자", "Action=Set Key=42",
+	r.Check(setAct == ActionSet && setKey == 42, "Set 단계 접근자", "Action=Set Key=42",
 		fmt.Sprintf("Action=%v Key=%d", setAct, setKey))
 
 	orderMu.Lock()
 	got := append([]string(nil), order...)
 	orderMu.Unlock()
 	want := []string{"mw1-before", "mw2-noNext", "mw1-after"}
-	r.check(err == nil && equalStrings(got, want), "Set 단계 실행 순서",
+	r.Check(err == nil && equalStrings(got, want), "Set 단계 실행 순서",
 		fmt.Sprintf("%v", want), fmt.Sprintf("%v (err=%v)", got, err))
 
-	r.check(err == nil && tm != nil, "nil 핸들러", "건너뛰고 정상 진행",
+	r.Check(err == nil && tm != nil, "nil 핸들러", "건너뛰고 정상 진행",
 		fmt.Sprintf("err=%v timer!=nil=%v", err, tm != nil))
 
 	// Next를 호출하지 않는 미들웨어가 있어도 실제 등록·만료가 이뤄져야 한다.
 	select {
 	case key := <-eng.C():
-		r.check(key == 42, "Next 미호출 시 종단 실행",
+		r.Check(key == 42, "Next 미호출 시 종단 실행",
 			"중단되지 않고 실제 만료·전달됨 (설계 확인)", fmt.Sprintf("수신 키=%d", key))
 	case <-time.After(waitTimeout):
-		r.check(false, "Next 미호출 시 종단 실행", "", "제한 시간 내 전달되지 않음")
+		r.Check(false, "Next 미호출 시 종단 실행", "", "제한 시간 내 전달되지 않음")
 	}
 
 	tm2, _ := eng.Set(neverFire, 7)
 	_ = eng.Cancel(tm2)
 
-	r.check(setCnt.Load() == 2 && cancelCnt.Load() == 1 && timeoutCnt.Load() == 1,
+	r.Check(setCnt.Load() == 2 && cancelCnt.Load() == 1 && timeoutCnt.Load() == 1,
 		"3단계 모두 실행", "Set 2회 / Cancel 1회 / Timeout 1회",
 		fmt.Sprintf("Set %d / Cancel %d / Timeout %d", setCnt.Load(), cancelCnt.Load(), timeoutCnt.Load()))
 
 	// Next 이후 각 단계의 결과를 Context.Err()로 관찰할 수 있어야 한다.
-	r.check(setErrSeen && setErr == nil && cancelErrSeen && cancelErr == nil && timeoutErrNil.Load(),
+	r.Check(setErrSeen && setErr == nil && cancelErrSeen && cancelErr == nil && timeoutErrNil.Load(),
 		"Next 이후 Err 관찰", "Set/Cancel/Timeout 모두 성공이 nil로 관찰됨",
 		fmt.Sprintf("set=%v(%v) cancel=%v(%v) timeout=%v",
 			setErrSeen, setErr, cancelErrSeen, cancelErr, timeoutErrNil.Load()))
 
 	// 실패한 연산의 에러도 관찰되어야 한다.
 	_ = eng.Cancel(tm2)
-	r.check(cancelErrSeen && cancelErr == ErrAlreadyCancelled, "실패 연산의 Err 관찰",
+	r.Check(cancelErrSeen && cancelErr == ErrAlreadyCancelled, "실패 연산의 Err 관찰",
 		"중복 Cancel의 ErrAlreadyCancelled가 관찰됨",
 		fmt.Sprintf("Err=%v", cancelErr))
 }
@@ -608,8 +436,8 @@ func equalStrings(a, b []string) bool {
 // ---------------------------------------------------------------------------
 
 func TestTimer_CloseSemantics(t *testing.T) {
-	r := newReport(t, "Close 이후 Set 차단과 대기 타이머 처리, 자원 정리 확인", "Capacity 10")
-	defer r.done()
+	r := testreport.New(t, "Close 이후 Set 차단과 대기 타이머 처리, 자원 정리 확인", "Capacity 10")
+	defer r.Done()
 
 	tw := newWheel(t)
 
@@ -617,7 +445,7 @@ func TestTimer_CloseSemantics(t *testing.T) {
 	base := runtime.NumGoroutine()
 
 	eng, _ := New[int](tw, 10)
-	r.check(runtime.NumGoroutine() > base, "New의 내부 고루틴", "생성 시 만료 큐 고루틴 기동",
+	r.Check(runtime.NumGoroutine() > base, "New의 내부 고루틴", "생성 시 만료 큐 고루틴 기동",
 		fmt.Sprintf("고루틴 수 변화 없음 (%d)", base))
 
 	// Close 이후 Set은 카운터를 소모하지 않고 거부되어야 한다.
@@ -641,9 +469,9 @@ func TestTimer_CloseSemantics(t *testing.T) {
 			rejected++
 		}
 	}
-	r.check(rejected == 5, "Close 후 Set 차단", "5회 모두 ErrClosed와 nil Timer",
+	r.Check(rejected == 5, "Close 후 Set 차단", "5회 모두 ErrClosed와 nil Timer",
 		fmt.Sprintf("%d회만 차단됨", rejected))
-	r.check(eng.Len() == before+pending, "거부된 Set의 카운터", "정원을 소모하지 않음",
+	r.Check(eng.Len() == before+pending, "거부된 Set의 카운터", "정원을 소모하지 않음",
 		fmt.Sprintf("Len=%d (기대 %d)", eng.Len(), before+pending))
 
 	// 대기 중이던 타이머는 취소되지 않고 만료되어 QFail로 집계된다.
@@ -655,7 +483,7 @@ func TestTimer_CloseSemantics(t *testing.T) {
 		}
 		time.Sleep(10 * time.Millisecond)
 	}
-	r.check(settled, "대기 타이머 만료 처리",
+	r.Check(settled, "대기 타이머 만료 처리",
 		fmt.Sprintf("Close 후에도 만료되어 QFail %d건으로 집계됨 (의도된 동작)", eng.QFail()),
 		fmt.Sprintf("QFail=%d (기대 %d 이상)", eng.QFail(), pending))
 
@@ -670,7 +498,7 @@ func TestTimer_CloseSemantics(t *testing.T) {
 		}
 		time.Sleep(10 * time.Millisecond)
 	}
-	r.check(recovered, "Close 후 고루틴 회수", fmt.Sprintf("기준선 %d개로 복귀", base),
+	r.Check(recovered, "Close 후 고루틴 회수", fmt.Sprintf("기준선 %d개로 복귀", base),
 		fmt.Sprintf("기준선 %d개, 현재 %d개", base, runtime.NumGoroutine()))
 }
 
@@ -684,10 +512,10 @@ func TestTimer_CloseSemantics(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 func TestTimer_Concurrency(t *testing.T) {
-	r := newReport(t,
+	r := testreport.New(t,
 		"멀티 고루틴 경합 안전성(1단계)과 처리 성능(2단계) 확인",
 		"1단계 Capacity 1 + 중간 Close / 2단계 Capacity 충분")
-	defer r.done()
+	defer r.Done()
 
 	concurrencyStress(t, r)
 	concurrencyPerf(t, r)
@@ -697,7 +525,7 @@ func TestTimer_Concurrency(t *testing.T) {
 //
 // Close 경합 구간(등록 직후 재확인 후 되돌리기)은 결정적으로 만들 수 없으므로,
 // 짧은 사이클을 여러 번 반복해 노출 확률을 높인다.
-func concurrencyStress(t *testing.T, r *report) {
+func concurrencyStress(t *testing.T, r *testreport.Report) {
 	const cycles = 30
 	for i := 0; i < cycles; i++ {
 		closeRaceCycle(t)
@@ -795,21 +623,21 @@ func concurrencyStress(t *testing.T, r *report) {
 
 	select {
 	case <-finished:
-		r.check(true, "1단계 완주",
+		r.Check(true, "1단계 완주",
 			fmt.Sprintf("패닉·데드락 없이 %v 내 완료", time.Since(begin).Round(time.Millisecond)), "")
 	case <-time.After(60 * time.Second):
-		r.check(false, "1단계 완주", "", "60초 내 완료되지 않음 (데드락 의심)")
+		r.Check(false, "1단계 완주", "", "60초 내 완료되지 않음 (데드락 의심)")
 		return
 	}
 	stop()
 
 	expected := uint64(workers * loops)
 	total := setOK.Load() + setFull.Load() + setClosed.Load()
-	r.check(total == expected, "1단계 시도 횟수 정합성",
+	r.Check(total == expected, "1단계 시도 횟수 정합성",
 		fmt.Sprintf("Set %d건이 누락 없이 분류됨", expected),
 		fmt.Sprintf("분류 합계 %d (기대 %d)", total, expected))
 
-	r.check(unexpected.Load() == 0 && cancelOther.Load() == 0, "1단계 예상 외 에러",
+	r.Check(unexpected.Load() == 0 && cancelOther.Load() == 0, "1단계 예상 외 에러",
 		"없음 (Full/Closed/AlreadyCancelled만 발생)",
 		fmt.Sprintf("Set %d건, Cancel %d건", unexpected.Load(), cancelOther.Load()))
 
@@ -818,14 +646,14 @@ func concurrencyStress(t *testing.T, r *report) {
 	// 상한은 단언하지 않는다. Len은 active와 만료 큐 적재량을 각각 읽어 더하므로
 	// 원자적 스냅숏이 아니고, 만료 처리 중인 타이머는 큐에 넣은 뒤 active가
 	// 감소하기 전까지 양쪽에 이중 계상되어 일시적으로 Cap을 넘을 수 있다.
-	r.check(minLen.Load() >= 0, "1단계 카운터 하한", "Len이 음수로 관측되지 않음",
+	r.Check(minLen.Load() >= 0, "1단계 카운터 하한", "Len이 음수로 관측되지 않음",
 		fmt.Sprintf("최소 Len=%d", minLen.Load()))
 
 	// Close가 반영되었다는 사실만 단언한다.
 	// "경합 중 몇 건이 ErrClosed로 거부되었는가"는 Close 완료 시점과 작업 종료 시점의
 	// 경합에 좌우되어 0건일 수도 있으므로 단언하지 않고 측정값으로만 남긴다.
 	// Close 이후 Set이 차단되는지는 TestTimer_CloseSemantics에서 결정적으로 확인한다.
-	r.check(eng.IsClosed(), "1단계 Close 반영", "경합 중 호출한 Close가 반영됨", "IsClosed=false")
+	r.Check(eng.IsClosed(), "1단계 Close 반영", "경합 중 호출한 Close가 반영됨", "IsClosed=false")
 
 	// 남은 타이머가 모두 만료될 때까지 기다린 뒤 카운터 수렴을 본다.
 	converged := false
@@ -836,14 +664,14 @@ func concurrencyStress(t *testing.T, r *report) {
 		}
 		time.Sleep(10 * time.Millisecond)
 	}
-	r.check(converged, "1단계 카운터 수렴", "모든 타이머 처리 후 Len=0",
+	r.Check(converged, "1단계 카운터 수렴", "모든 타이머 처리 후 Len=0",
 		fmt.Sprintf("Len=%d QFail=%d", eng.Len(), eng.QFail()))
 
-	r.note("Len 관측 범위 [%d, %d] (Cap %d, 만료 중 이중 계상으로 상한 초과 가능)",
+	r.Note("Len 관측 범위 [%d, %d] (Cap %d, 만료 중 이중 계상으로 상한 초과 가능)",
 		minLen.Load(), maxLen.Load(), eng.Cap())
-	r.note("1단계  Capacity 1, 고루틴 %d개, 총 %d회 Set, 소요 %v",
+	r.Note("1단계  Capacity 1, 고루틴 %d개, 총 %d회 Set, 소요 %v",
 		workers, expected, time.Since(begin).Round(time.Millisecond))
-	r.note("       성공 %d / 정원초과 %d / 종료거부 %d / 취소 %d / 수신 %d",
+	r.Note("       성공 %d / 정원초과 %d / 종료거부 %d / 취소 %d / 수신 %d",
 		setOK.Load(), setFull.Load(), setClosed.Load(), cancelOK.Load(), received.Load())
 }
 
@@ -932,7 +760,7 @@ func cancelRaceCycle(t *testing.T) {
 }
 
 // 2단계: 정원이 넉넉한 조건에서 Set/Cancel 처리량을 측정한다.
-func concurrencyPerf(t *testing.T, r *report) {
+func concurrencyPerf(t *testing.T, r *testreport.Report) {
 	const workers = 8
 	const loops = 3000
 	const total = workers * loops
@@ -982,7 +810,7 @@ func concurrencyPerf(t *testing.T, r *report) {
 	stopMW := drain(mw, nil)
 	mwDur, _ := measure(mw)
 
-	r.check(plainFail == 0 && plain.Len() == 0, "2단계 성공 경로",
+	r.Check(plainFail == 0 && plain.Len() == 0, "2단계 성공 경로",
 		fmt.Sprintf("%d회 Set+Cancel 모두 성공, 카운터 0 복귀", total),
 		fmt.Sprintf("실패 %d건, Len=%d", plainFail, plain.Len()))
 
@@ -1001,11 +829,11 @@ func concurrencyPerf(t *testing.T, r *report) {
 		overhead = fmt.Sprintf(" (%+.1f%%)", (float64(mwDur)/float64(plainDur)-1)*100)
 	}
 
-	r.note("2단계  Capacity %d, 고루틴 %d개, 총 %d회 Set+Cancel", total+1, workers, total)
-	r.note("Set+Cancel %-14s %s", perOp(plainDur), throughput(plainDur))
-	r.note("미들웨어 0개 → 3개  %v → %v%s",
+	r.Note("2단계  Capacity %d, 고루틴 %d개, 총 %d회 Set+Cancel", total+1, workers, total)
+	r.Note("Set+Cancel %-14s %s", perOp(plainDur), throughput(plainDur))
+	r.Note("미들웨어 0개 → 3개  %v → %v%s",
 		(plainDur / total).Round(time.Nanosecond), (mwDur / total).Round(time.Nanosecond), overhead)
-	r.note("(-race 실행 시 위 수치는 수 배 부풀려짐)")
+	r.Note("(-race 실행 시 위 수치는 수 배 부풀려짐)")
 
 	plain.Close()
 	stopPlain()

@@ -3,213 +3,41 @@ package hashmap
 import (
 	"errors"
 	"fmt"
-	"os"
 	"sync"
 	"sync/atomic"
 	"testing"
+
 	"time"
+
+	"github.com/team-core-1/util/internal/testreport"
 )
 
-// ---------------------------------------------------------------------------
-// 결과 출력 도우미
-//
-// 각 테스트는 검증 항목을 report에 누적하고, 종료 시 통과 항목을 먼저,
-// 실패 항목을 나중에 출력한다. TestMain은 전체 요약을 같은 순서로 낸다.
-// ---------------------------------------------------------------------------
-
-const nameWidth = 28
-
-// runeWidth는 한글/한자 등 2칸을 차지하는 문자를 구분한다.
-// 이름 열 정렬이 어긋나지 않도록 하기 위함이다.
-func runeWidth(r rune) int {
-	switch {
-	case r >= 0x1100 && r <= 0x115F,
-		r >= 0x2E80 && r <= 0xA4CF,
-		r >= 0xAC00 && r <= 0xD7A3,
-		r >= 0xF900 && r <= 0xFAFF,
-		r >= 0xFF00 && r <= 0xFF60,
-		r >= 0xFFE0 && r <= 0xFFE6:
-		return 2
-	}
-	return 1
-}
-
-func padName(s string) string {
-	w := 0
-	for _, r := range s {
-		w += runeWidth(r)
-	}
-	if w >= nameWidth {
-		return s + " "
-	}
-	return s + spaces(nameWidth-w)
-}
-
-func spaces(n int) string {
-	b := make([]byte, n)
-	for i := range b {
-		b[i] = ' '
-	}
-	return string(b)
-}
-
-type checkItem struct {
-	name   string
-	detail string
-}
-
-type report struct {
-	t       *testing.T
-	purpose string
-	cond    string
-	passed  []checkItem
-	failed  []checkItem
-	notes   []string
-}
-
-type summaryEntry struct {
-	name      string
-	pass      int
-	fail      int
-	firstFail string
-}
-
-var (
-	summaryMu sync.Mutex
-	summaries []summaryEntry
-)
-
-func newReport(t *testing.T, purpose, cond string) *report {
-	return &report{t: t, purpose: purpose, cond: cond}
-}
-
-// check는 ok가 참이면 통과, 거짓이면 실패로 기록하고 테스트를 실패시킨다.
-func (r *report) check(ok bool, name, passDetail, failDetail string) {
-	if ok {
-		r.passed = append(r.passed, checkItem{name, passDetail})
-		return
-	}
-	r.failed = append(r.failed, checkItem{name, failDetail})
-	r.t.Errorf("%s: %s", name, failDetail)
-}
-
-// checkErr는 에러 값이 기대와 일치하는지 확인한다.
-func (r *report) checkErr(got, want error, name, passDetail string) {
-	r.check(got == want, name, passDetail, fmt.Sprintf("%v 기대, 실제 %v", want, got))
-}
-
-// note는 단언하지 않는 참고 수치를 기록한다.
-func (r *report) note(format string, args ...any) {
-	r.notes = append(r.notes, fmt.Sprintf(format, args...))
-}
-
-func (r *report) done() {
-	t := r.t
-	t.Logf("── %s %s", t.Name(), spaces(max(0, 54-len(t.Name()))))
-	t.Logf("   목적 : %s", r.purpose)
-	t.Logf("   조건 : %s", r.cond)
-
-	if len(r.passed) > 0 {
-		t.Logf("")
-		t.Logf("   [PASS] %d건", len(r.passed))
-		for _, c := range r.passed {
-			t.Logf("     · %s%s", padName(c.name), c.detail)
-		}
-	}
-	if len(r.failed) > 0 {
-		t.Logf("")
-		t.Logf("   [FAIL] %d건", len(r.failed))
-		for _, c := range r.failed {
-			t.Logf("     · %s%s", padName(c.name), c.detail)
-		}
-	}
-	if len(r.notes) > 0 {
-		t.Logf("")
-		t.Logf("   [측정] 참고용, 단언 아님")
-		for _, n := range r.notes {
-			t.Logf("     · %s", n)
-		}
-	}
-
-	total := len(r.passed) + len(r.failed)
-	t.Logf("")
-	t.Logf("   결과 : %d/%d 통과", len(r.passed), total)
-
-	e := summaryEntry{name: t.Name(), pass: len(r.passed), fail: len(r.failed)}
-	if len(r.failed) > 0 {
-		e.firstFail = r.failed[0].name
-	}
-	summaryMu.Lock()
-	summaries = append(summaries, e)
-	summaryMu.Unlock()
-}
-
-func TestMain(m *testing.M) {
-	code := m.Run()
-
-	var passList, failList []summaryEntry
-	var totalPass, totalFail int
-	for _, s := range summaries {
-		totalPass += s.pass
-		totalFail += s.fail
-		if s.fail > 0 {
-			failList = append(failList, s)
-		} else {
-			passList = append(passList, s)
-		}
-	}
-
-	line := "========================================================="
-	fmt.Println()
-	fmt.Println(line)
-	fmt.Println(" hashmap 테스트 요약")
-	fmt.Println(line)
-
-	if len(passList) > 0 {
-		fmt.Printf(" [PASS] %d개\n", len(passList))
-		for _, s := range passList {
-			fmt.Printf("   %s%d/%d\n", padName(s.name), s.pass, s.pass+s.fail)
-		}
-	}
-	if len(failList) > 0 {
-		fmt.Printf(" [FAIL] %d개\n", len(failList))
-		for _, s := range failList {
-			fmt.Printf("   %s%d/%d    %s\n", padName(s.name), s.pass, s.pass+s.fail, s.firstFail)
-		}
-	}
-
-	fmt.Println("---------------------------------------------------------")
-	fmt.Printf(" %d개 함수 / 검증 %d항목 / 통과 %d / 실패 %d\n",
-		len(summaries), totalPass+totalFail, totalPass, totalFail)
-	fmt.Println(line)
-
-	os.Exit(code)
-}
+func TestMain(m *testing.M) { testreport.Main(m, "hashmap") }
 
 // ---------------------------------------------------------------------------
 // T1. 생성과 소멸
 // ---------------------------------------------------------------------------
 
 func TestHashMap_NewAndClose(t *testing.T) {
-	r := newReport(t, "New의 용량 검증과 Close 이후 상태 전이 확인", "Capacity 10, 단일 고루틴")
-	defer r.done()
+	r := testreport.New(t, "New의 용량 검증과 Close 이후 상태 전이 확인", "Capacity 10, 단일 고루틴")
+	defer r.Done()
 
 	_, err := New[int, int](0)
-	r.checkErr(err, ErrInvalidCap, "New(0)", "ErrInvalidCap")
+	r.CheckErr(err, ErrInvalidCap, "New(0)", "ErrInvalidCap")
 
 	_, err = New[int, int](-1)
-	r.checkErr(err, ErrInvalidCap, "New(-1)", "ErrInvalidCap")
+	r.CheckErr(err, ErrInvalidCap, "New(-1)", "ErrInvalidCap")
 
 	hm, err := New[int, int](10)
 	if err != nil {
 		t.Fatalf("New(10) 실패: %v", err)
 	}
-	r.check(hm.Len() == 0 && hm.Cap() == 10 && !hm.IsClosed(),
+	r.Check(hm.Len() == 0 && hm.Cap() == 10 && !hm.IsClosed(),
 		"생성 직후 상태", "Len=0 Cap=10 IsClosed=false",
 		fmt.Sprintf("Len=%d Cap=%d IsClosed=%v", hm.Len(), hm.Cap(), hm.IsClosed()))
 
 	hm.Close()
-	r.check(hm.IsClosed() && hm.Len() == 0 && hm.Cap() == 0,
+	r.Check(hm.IsClosed() && hm.Len() == 0 && hm.Cap() == 0,
 		"Close 후 상태", "IsClosed=true Len=0 Cap=0",
 		fmt.Sprintf("IsClosed=%v Len=%d Cap=%d", hm.IsClosed(), hm.Len(), hm.Cap()))
 
@@ -221,7 +49,7 @@ func TestHashMap_NewAndClose(t *testing.T) {
 		hm.Use(func(c *Context[int, int]) { c.Next() })
 		return
 	}()
-	r.check(safe, "Close 후 중복 호출", "Close/Delete/Use 모두 패닉 없음", "패닉 발생")
+	r.Check(safe, "Close 후 중복 호출", "Close/Delete/Use 모두 패닉 없음", "패닉 발생")
 }
 
 // ---------------------------------------------------------------------------
@@ -229,31 +57,31 @@ func TestHashMap_NewAndClose(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 func TestHashMap_BasicOps(t *testing.T) {
-	r := newReport(t, "Put/Get/Delete의 정상 경로 동작 확인", "Capacity 10, 단일 고루틴")
-	defer r.done()
+	r := testreport.New(t, "Put/Get/Delete의 정상 경로 동작 확인", "Capacity 10, 단일 고루틴")
+	defer r.Done()
 
 	hm, _ := New[int, string](10)
 	defer hm.Close()
 
 	err := hm.Put(1, "one")
 	v, getErr := hm.Get(1)
-	r.check(err == nil && getErr == nil && v == "one",
+	r.Check(err == nil && getErr == nil && v == "one",
 		"Put 후 Get", "저장한 값이 그대로 조회됨",
 		fmt.Sprintf("put=%v get=%v value=%q", err, getErr, v))
 
 	hm.Delete(1)
 	_, getErr = hm.Get(1)
-	r.checkErr(getErr, ErrKeyNotFound, "Delete 후 Get", "ErrKeyNotFound")
+	r.CheckErr(getErr, ErrKeyNotFound, "Delete 후 Get", "ErrKeyNotFound")
 
 	before := hm.Len()
 	hm.Delete(999)
-	r.check(hm.Len() == before, "미존재 키 Delete",
+	r.Check(hm.Len() == before, "미존재 키 Delete",
 		fmt.Sprintf("Len 불변 (%d)", before),
 		fmt.Sprintf("Len이 %d에서 %d로 변함", before, hm.Len()))
 
 	err = hm.Put(1, "again")
 	v, _ = hm.Get(1)
-	r.check(err == nil && v == "again", "삭제한 키 재삽입", "정상 저장됨",
+	r.Check(err == nil && v == "again", "삭제한 키 재삽입", "정상 저장됨",
 		fmt.Sprintf("err=%v value=%q", err, v))
 }
 
@@ -262,34 +90,34 @@ func TestHashMap_BasicOps(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 func TestHashMap_Errors(t *testing.T) {
-	r := newReport(t, "정의된 에러 7종이 정확한 조건에서 반환되는지", "Capacity 3, 단일 고루틴")
-	defer r.done()
+	r := testreport.New(t, "정의된 에러 7종이 정확한 조건에서 반환되는지", "Capacity 3, 단일 고루틴")
+	defer r.Done()
 
 	hm, _ := New[int, int](3)
 
 	_ = hm.Put(1, 100)
 	err := hm.Put(1, 200)
 	kept, _ := hm.Get(1)
-	r.check(err == ErrDupKey && kept == 100, "중복 키 Put",
+	r.Check(err == ErrDupKey && kept == 100, "중복 키 Put",
 		"ErrDupKey (기존 값 보존)",
 		fmt.Sprintf("err=%v, 기존 값=%d", err, kept))
 
 	_ = hm.Put(2, 200)
 	_ = hm.Put(3, 300)
-	r.checkErr(hm.Put(4, 400), ErrFull, "용량 초과 Put", "ErrFull")
+	r.CheckErr(hm.Put(4, 400), ErrFull, "용량 초과 Put", "ErrFull")
 
 	// 용량 검사가 중복 키 검사보다 먼저 수행된다.
-	r.checkErr(hm.Put(1, 999), ErrFull, "가득 찬 맵 + 중복 키", "ErrFull (용량 검사 우선)")
+	r.CheckErr(hm.Put(1, 999), ErrFull, "가득 찬 맵 + 중복 키", "ErrFull (용량 검사 우선)")
 
 	_, err = hm.Get(999)
 	_, doErr := hm.Do(999, func(k, v int) (int, error) { return v, nil })
-	r.check(err == ErrKeyNotFound && doErr == ErrKeyNotFound,
+	r.Check(err == ErrKeyNotFound && doErr == ErrKeyNotFound,
 		"미존재 키 Get/Do", "ErrKeyNotFound",
 		fmt.Sprintf("get=%v do=%v", err, doErr))
 
 	_, err = hm.Do(1, nil)
 	_, doErr = hm.DoAll(nil)
-	r.check(err == ErrNilCallback && doErr == ErrNilCallback,
+	r.Check(err == ErrNilCallback && doErr == ErrNilCallback,
 		"nil 콜백 Do/DoAll", "ErrNilCallback",
 		fmt.Sprintf("do=%v doAll=%v", err, doErr))
 
@@ -298,13 +126,13 @@ func TestHashMap_Errors(t *testing.T) {
 	_, e2 := hm.Get(1)
 	_, e3 := hm.Do(1, func(k, v int) (int, error) { return v, nil })
 	_, e4 := hm.DoAll(func(k, v int) (int, error) { return v, nil })
-	r.check(e1 == ErrClosed && e2 == ErrClosed && e3 == ErrClosed && e4 == ErrClosed,
+	r.Check(e1 == ErrClosed && e2 == ErrClosed && e3 == ErrClosed && e4 == ErrClosed,
 		"Close 후 4개 메서드", "ErrClosed",
 		fmt.Sprintf("put=%v get=%v do=%v doAll=%v", e1, e2, e3, e4))
 
 	// 닫힘 검사가 nil 콜백 검사보다 먼저 수행된다.
 	_, err = hm.Do(1, nil)
-	r.checkErr(err, ErrClosed, "닫힌 맵 + nil 콜백", "ErrClosed (닫힘 검사 우선)")
+	r.CheckErr(err, ErrClosed, "닫힌 맵 + nil 콜백", "ErrClosed (닫힘 검사 우선)")
 }
 
 // ---------------------------------------------------------------------------
@@ -312,33 +140,33 @@ func TestHashMap_Errors(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 func TestHashMap_NilReceiver(t *testing.T) {
-	r := newReport(t, "nil 맵에 대한 모든 공개 메서드가 패닉 없이 방어되는지", "초기화하지 않은 *Map 포인터")
-	defer r.done()
+	r := testreport.New(t, "nil 맵에 대한 모든 공개 메서드가 패닉 없이 방어되는지", "초기화하지 않은 *Map 포인터")
+	defer r.Done()
 
 	var hm *Map[int, string]
 
-	r.checkErr(hm.Put(1, "a"), ErrNil, "Put", "ErrNil")
+	r.CheckErr(hm.Put(1, "a"), ErrNil, "Put", "ErrNil")
 
 	v, err := hm.Get(1)
-	r.check(err == ErrNil && v == "", "Get", "ErrNil, 제로값 반환",
+	r.Check(err == ErrNil && v == "", "Get", "ErrNil, 제로값 반환",
 		fmt.Sprintf("err=%v value=%q", err, v))
 
 	_, err = hm.Do(1, func(k int, v string) (int, error) { return 0, nil })
-	r.checkErr(err, ErrNil, "Do", "ErrNil")
+	r.CheckErr(err, ErrNil, "Do", "ErrNil")
 
 	_, err = hm.DoAll(func(k int, v string) (int, error) { return 0, nil })
-	r.checkErr(err, ErrNil, "DoAll", "ErrNil")
+	r.CheckErr(err, ErrNil, "DoAll", "ErrNil")
 
-	r.check(hm.Len() == 0 && hm.Cap() == 0, "Len/Cap", "둘 다 0",
+	r.Check(hm.Len() == 0 && hm.Cap() == 0, "Len/Cap", "둘 다 0",
 		fmt.Sprintf("Len=%d Cap=%d", hm.Len(), hm.Cap()))
 
-	r.check(hm.IsClosed(), "IsClosed", "true", "false")
+	r.Check(hm.IsClosed(), "IsClosed", "true", "false")
 
 	count := 0
 	for range hm.All() {
 		count++
 	}
-	r.check(count == 0, "All", "0회 순회", fmt.Sprintf("%d회 순회", count))
+	r.Check(count == 0, "All", "0회 순회", fmt.Sprintf("%d회 순회", count))
 
 	safe := func() (ok bool) {
 		defer func() { ok = recover() == nil }()
@@ -347,7 +175,7 @@ func TestHashMap_NilReceiver(t *testing.T) {
 		hm.Close()
 		return
 	}()
-	r.check(safe, "Delete/Use/Close", "패닉 없음", "패닉 발생")
+	r.Check(safe, "Delete/Use/Close", "패닉 없음", "패닉 발생")
 }
 
 // ---------------------------------------------------------------------------
@@ -355,29 +183,29 @@ func TestHashMap_NilReceiver(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 func TestHashMap_LenCap(t *testing.T) {
-	r := newReport(t, "삽입·삭제·Close에 따른 Len/Cap 변화 확인", "Capacity 5, 단일 고루틴")
-	defer r.done()
+	r := testreport.New(t, "삽입·삭제·Close에 따른 Len/Cap 변화 확인", "Capacity 5, 단일 고루틴")
+	defer r.Done()
 
 	hm, _ := New[int, int](5)
 
-	r.check(hm.Len() == 0 && hm.Cap() == 5, "초기 상태", "Len=0 Cap=5",
+	r.Check(hm.Len() == 0 && hm.Cap() == 5, "초기 상태", "Len=0 Cap=5",
 		fmt.Sprintf("Len=%d Cap=%d", hm.Len(), hm.Cap()))
 
 	for i := 1; i <= 3; i++ {
 		_ = hm.Put(i, i)
 	}
-	r.check(hm.Len() == 3, "3건 삽입", "Len=3", fmt.Sprintf("Len=%d", hm.Len()))
+	r.Check(hm.Len() == 3, "3건 삽입", "Len=3", fmt.Sprintf("Len=%d", hm.Len()))
 
 	hm.Delete(1)
-	r.check(hm.Len() == 2, "1건 삭제", "Len=2", fmt.Sprintf("Len=%d", hm.Len()))
+	r.Check(hm.Len() == 2, "1건 삭제", "Len=2", fmt.Sprintf("Len=%d", hm.Len()))
 
 	hm.Delete(999)
-	r.check(hm.Len() == 2, "미존재 키 삭제", "Len 불변 (2)", fmt.Sprintf("Len=%d", hm.Len()))
+	r.Check(hm.Len() == 2, "미존재 키 삭제", "Len 불변 (2)", fmt.Sprintf("Len=%d", hm.Len()))
 
-	r.check(hm.Cap() == 5, "삽입·삭제 중 Cap", "5로 불변", fmt.Sprintf("Cap=%d", hm.Cap()))
+	r.Check(hm.Cap() == 5, "삽입·삭제 중 Cap", "5로 불변", fmt.Sprintf("Cap=%d", hm.Cap()))
 
 	hm.Close()
-	r.check(hm.Len() == 0 && hm.Cap() == 0, "Close 후", "Len=0 Cap=0",
+	r.Check(hm.Len() == 0 && hm.Cap() == 0, "Close 후", "Len=0 Cap=0",
 		fmt.Sprintf("Len=%d Cap=%d", hm.Len(), hm.Cap()))
 }
 
@@ -386,8 +214,8 @@ func TestHashMap_LenCap(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 func TestHashMap_Iteration(t *testing.T) {
-	r := newReport(t, "All 반복자의 순회·조기 종료·락 해제 확인", "Capacity 10, 5건 저장")
-	defer r.done()
+	r := testreport.New(t, "All 반복자의 순회·조기 종료·락 해제 확인", "Capacity 10, 5건 저장")
+	defer r.Done()
 
 	hm, _ := New[int, int](10)
 	defer hm.Close()
@@ -400,7 +228,7 @@ func TestHashMap_Iteration(t *testing.T) {
 		sum += v
 		count++
 	}
-	r.check(count == 5 && sum == 150, "전체 순회", "5건 / 합계 150",
+	r.Check(count == 5 && sum == 150, "전체 순회", "5건 / 합계 150",
 		fmt.Sprintf("%d건 / 합계 %d", count, sum))
 
 	visited := 0
@@ -413,11 +241,11 @@ func TestHashMap_Iteration(t *testing.T) {
 	go func() { done <- hm.Put(100, 100) }()
 	select {
 	case err := <-done:
-		r.check(visited == 1 && err == nil, "조기 break 후 쓰기",
+		r.Check(visited == 1 && err == nil, "조기 break 후 쓰기",
 			"1건만 순회, 이후 Put 정상 (락 해제 확인)",
 			fmt.Sprintf("순회 %d건, Put=%v", visited, err))
 	case <-time.After(3 * time.Second):
-		r.check(false, "조기 break 후 쓰기", "", "데드락: RLock이 해제되지 않음")
+		r.Check(false, "조기 break 후 쓰기", "", "데드락: RLock이 해제되지 않음")
 	}
 
 	var toDelete []int
@@ -430,7 +258,7 @@ func TestHashMap_Iteration(t *testing.T) {
 		hm.Delete(k)
 	}
 	_, err := hm.Get(5)
-	r.check(err == ErrKeyNotFound, "순회 후 외부 삭제", "수집한 키가 정상 삭제됨",
+	r.Check(err == ErrKeyNotFound, "순회 후 외부 삭제", "수집한 키가 정상 삭제됨",
 		fmt.Sprintf("삭제 대상 %d건, Get=%v", len(toDelete), err))
 
 	for _, v := range hm.All() {
@@ -438,7 +266,7 @@ func TestHashMap_Iteration(t *testing.T) {
 		_ = v
 	}
 	kept, _ := hm.Get(1)
-	r.check(kept == 10, "순회 값 수정", "복사본이라 맵에 반영되지 않음",
+	r.Check(kept == 10, "순회 값 수정", "복사본이라 맵에 반영되지 않음",
 		fmt.Sprintf("원본이 %d로 변경됨", kept))
 }
 
@@ -447,8 +275,8 @@ func TestHashMap_Iteration(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 func TestHashMap_Callback(t *testing.T) {
-	r := newReport(t, "Do/DoAll의 반환값 전달과 에러 단축 평가 확인", "Capacity 10, 5건 저장")
-	defer r.done()
+	r := testreport.New(t, "Do/DoAll의 반환값 전달과 에러 단축 평가 확인", "Capacity 10, 5건 저장")
+	defer r.Done()
 
 	hm, _ := New[int, int](10)
 	defer hm.Close()
@@ -457,11 +285,11 @@ func TestHashMap_Callback(t *testing.T) {
 	}
 
 	res, err := hm.Do(3, func(k, v int) (int, error) { return v * 2, nil })
-	r.check(err == nil && res == 6, "Do 반환값 전달", "콜백 결과 6이 그대로 반환됨",
+	r.Check(err == nil && res == 6, "Do 반환값 전달", "콜백 결과 6이 그대로 반환됨",
 		fmt.Sprintf("res=%d err=%v", res, err))
 
 	sum, err := hm.DoAll(func(k, v int) (int, error) { return v, nil })
-	r.check(err == nil && sum == 15, "DoAll 합계", "1..5 합계 15",
+	r.Check(err == nil && sum == 15, "DoAll 합계", "1..5 합계 15",
 		fmt.Sprintf("sum=%d err=%v", sum, err))
 
 	errStop := errors.New("stop")
@@ -473,7 +301,7 @@ func TestHashMap_Callback(t *testing.T) {
 		}
 		return 1, nil
 	})
-	r.check(errors.Is(err, errStop) && calls == 3 && partial == 2,
+	r.Check(errors.Is(err, errStop) && calls == 3 && partial == 2,
 		"DoAll 에러 단축 평가", "3번째 호출에서 중단, 그때까지 합계 2",
 		fmt.Sprintf("calls=%d partial=%d err=%v", calls, partial, err))
 
@@ -482,7 +310,7 @@ func TestHashMap_Callback(t *testing.T) {
 		return v, nil
 	})
 	kept, _ := hm.Get(1)
-	r.check(kept == 1, "콜백 내 값 수정", "복사본이라 맵에 반영되지 않음",
+	r.Check(kept == 1, "콜백 내 값 수정", "복사본이라 맵에 반영되지 않음",
 		fmt.Sprintf("원본이 %d로 변경됨", kept))
 }
 
@@ -491,8 +319,8 @@ func TestHashMap_Callback(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 func TestHashMap_Middleware(t *testing.T) {
-	r := newReport(t, "Use 체인의 실행 순서·Context 접근자·중단 불가 설계 확인", "미들웨어 3개(nil 포함) 등록")
-	defer r.done()
+	r := testreport.New(t, "Use 체인의 실행 순서·Context 접근자·중단 불가 설계 확인", "미들웨어 3개(nil 포함) 등록")
+	defer r.Done()
 
 	hm, _ := New[int, string](10)
 	defer hm.Close()
@@ -519,18 +347,18 @@ func TestHashMap_Middleware(t *testing.T) {
 	err := hm.Put(7, "seven")
 
 	// 접근자 값은 이후 다른 연산에서 덮이므로 Put 직후에 확인한다.
-	r.check(act == ActionPut && gotKey == 7 && gotVal == "seven", "Put 단계 접근자",
+	r.Check(act == ActionPut && gotKey == 7 && gotVal == "seven", "Put 단계 접근자",
 		"Action=Put Key=7 Value=seven",
 		fmt.Sprintf("Action=%v Key=%d Value=%q", act, gotKey, gotVal))
 
 	want := []string{"mw1-before", "mw2-noNext", "mw1-after"}
-	r.check(err == nil && equalStrings(order, want), "실행 순서",
+	r.Check(err == nil && equalStrings(order, want), "실행 순서",
 		fmt.Sprintf("%v", want), fmt.Sprintf("%v (err=%v)", order, err))
 
-	r.check(err == nil, "nil 핸들러", "건너뛰고 정상 진행", fmt.Sprintf("err=%v", err))
+	r.Check(err == nil, "nil 핸들러", "건너뛰고 정상 진행", fmt.Sprintf("err=%v", err))
 
 	v, getErr := hm.Get(7)
-	r.check(getErr == nil && v == "seven", "Next 미호출 시 종단 실행",
+	r.Check(getErr == nil && v == "seven", "Next 미호출 시 종단 실행",
 		"중단되지 않고 실제 저장됨 (설계 확인)",
 		fmt.Sprintf("get=%v value=%q", getErr, v))
 
@@ -546,14 +374,14 @@ func TestHashMap_Middleware(t *testing.T) {
 	okGet := obsAct == ActionGet && obsVal == "seven" && obsErr == nil
 	_, _ = hm.Get(9999)
 	okMiss := obsErr == ErrKeyNotFound
-	r.check(okGet && okMiss, "Next 이후 결과 관찰",
+	r.Check(okGet && okMiss, "Next 이후 결과 관찰",
 		"Get 성공 시 값, 실패 시 ErrKeyNotFound 관찰됨",
 		fmt.Sprintf("성공관찰=%v 실패관찰=%v(%v)", okGet, okMiss, obsErr))
 
 	var delAct ActionType
 	hm.Use(func(c *Context[int, string]) { delAct = c.Action() })
 	hm.Delete(7)
-	r.check(delAct == ActionDelete, "Delete 단계 접근자", "Action=Delete",
+	r.Check(delAct == ActionDelete, "Delete 단계 접근자", "Action=Delete",
 		fmt.Sprintf("Action=%v", delAct))
 }
 
@@ -578,17 +406,17 @@ func equalStrings(a, b []string) bool {
 // ---------------------------------------------------------------------------
 
 func TestHashMap_Concurrency(t *testing.T) {
-	r := newReport(t,
+	r := testreport.New(t,
 		"멀티 고루틴 경합 안전성(1단계)과 성공 경로 처리 성능(2단계) 확인",
 		"1단계 Capacity 1 / 2단계 Capacity 충분")
-	defer r.done()
+	defer r.Done()
 
 	concurrencyStress(t, r)
 	concurrencyPerf(t, r)
 }
 
 // 1단계: Capacity 1, 극한 경합. 안전성만 검증한다.
-func concurrencyStress(t *testing.T, r *report) {
+func concurrencyStress(t *testing.T, r *testreport.Report) {
 	const groups = 100
 	const loops = 300
 
@@ -664,9 +492,9 @@ func concurrencyStress(t *testing.T, r *report) {
 
 	select {
 	case <-finished:
-		r.check(true, "1단계 완주", fmt.Sprintf("패닉·데드락 없이 %v 내 완료", time.Since(begin).Round(time.Millisecond)), "")
+		r.Check(true, "1단계 완주", fmt.Sprintf("패닉·데드락 없이 %v 내 완료", time.Since(begin).Round(time.Millisecond)), "")
 	case <-time.After(60 * time.Second):
-		r.check(false, "1단계 완주", "", "60초 내 완료되지 않음 (데드락 의심)")
+		r.Check(false, "1단계 완주", "", "60초 내 완료되지 않음 (데드락 의심)")
 		return
 	}
 
@@ -674,25 +502,25 @@ func concurrencyStress(t *testing.T, r *report) {
 	expected := uint64(groups * loops)
 	totalPut := putOK.Load() + putRejected.Load() + putClosed.Load()
 	totalGet := getOK.Load() + getMiss.Load() + getClosed.Load()
-	r.check(totalPut == expected && totalGet == expected && delDone.Load() == expected,
+	r.Check(totalPut == expected && totalGet == expected && delDone.Load() == expected,
 		"1단계 시도 횟수 정합성",
 		fmt.Sprintf("Put/Get/Delete 각 %d건이 누락 없이 분류됨", expected),
 		fmt.Sprintf("Put %d, Get %d, Delete %d (기대 각 %d)", totalPut, totalGet, delDone.Load(), expected))
 
-	r.check(unexpected.Load() == 0, "1단계 예상 외 에러", "없음 (Full/DupKey/KeyNotFound/Closed만 발생)",
+	r.Check(unexpected.Load() == 0, "1단계 예상 외 에러", "없음 (Full/DupKey/KeyNotFound/Closed만 발생)",
 		fmt.Sprintf("%d건 발생", unexpected.Load()))
 
 	closedTotal := putClosed.Load() + getClosed.Load()
-	r.check(hm.IsClosed() && closedTotal > 0, "1단계 Close 반영",
+	r.Check(hm.IsClosed() && closedTotal > 0, "1단계 Close 반영",
 		fmt.Sprintf("경합 중 Close 이후 %d건이 ErrClosed로 거부됨", closedTotal),
 		fmt.Sprintf("IsClosed=%v, ErrClosed 관측 %d건", hm.IsClosed(), closedTotal))
 
-	r.note("1단계  Capacity 1, 고루틴 %d개, 총 %d 연산, 소요 %v",
+	r.Note("1단계  Capacity 1, 고루틴 %d개, 총 %d 연산, 소요 %v",
 		groups*3+1, uint64(groups*loops*3), time.Since(begin).Round(time.Millisecond))
 }
 
 // 2단계: 연산이 성공하는 용량에서 처리 성능을 측정한다.
-func concurrencyPerf(t *testing.T, r *report) {
+func concurrencyPerf(t *testing.T, r *testreport.Report) {
 	const workers = 8
 	const loops = 5000
 	const total = workers * loops
@@ -738,7 +566,7 @@ func concurrencyPerf(t *testing.T, r *report) {
 	})
 	delDur := run(func(w, j int) { hm.Delete(w*loops + j) })
 
-	r.check(putFail.Load() == 0 && getFail.Load() == 0 && hm.Len() == 0,
+	r.Check(putFail.Load() == 0 && getFail.Load() == 0 && hm.Len() == 0,
 		"2단계 성공 경로", fmt.Sprintf("%d건 Put/Get/Delete 모두 성공", total),
 		fmt.Sprintf("put실패=%d get실패=%d 잔여=%d", putFail.Load(), getFail.Load(), hm.Len()))
 
@@ -771,16 +599,16 @@ func concurrencyPerf(t *testing.T, r *report) {
 		return fmt.Sprintf("%.2fM ops/s", float64(total)/d.Seconds()/1e6)
 	}
 
-	r.note("2단계  Capacity %d, 고루틴 %d개, 연산별 %d회", total+1, workers, total)
-	r.note("Put     %-16s %s", perOp(putDur), throughput(putDur))
-	r.note("Get     %-16s %s", perOp(getDur), throughput(getDur))
-	r.note("Delete  %-16s %s", perOp(delDur), throughput(delDur))
+	r.Note("2단계  Capacity %d, 고루틴 %d개, 연산별 %d회", total+1, workers, total)
+	r.Note("Put     %-16s %s", perOp(putDur), throughput(putDur))
+	r.Note("Get     %-16s %s", perOp(getDur), throughput(getDur))
+	r.Note("Delete  %-16s %s", perOp(delDur), throughput(delDur))
 
 	overhead := ""
 	if plainGetDur > 0 {
 		overhead = fmt.Sprintf(" (%+.1f%%)", (float64(mwGetDur)/float64(plainGetDur)-1)*100)
 	}
-	r.note("미들웨어 0개 → 3개  Get %v → %v%s",
+	r.Note("미들웨어 0개 → 3개  Get %v → %v%s",
 		(plainGetDur / total).Round(time.Nanosecond), (mwGetDur / total).Round(time.Nanosecond), overhead)
-	r.note("(-race 실행 시 위 수치는 수 배 부풀려짐)")
+	r.Note("(-race 실행 시 위 수치는 수 배 부풀려짐)")
 }
