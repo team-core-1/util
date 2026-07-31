@@ -16,13 +16,15 @@ func (e ErrorType) Error() string {
 }
 
 const (
-	ErrInvalidCap       = ErrorType("timer: invalid capacity")
-	ErrNil              = ErrorType("timer: nil")
-	ErrClosed           = ErrorType("timer: closed")
-	ErrExpiredQueueFull = ErrorType("timer: expired queue full")
-	ErrAlreadyCancelled = ErrorType("timer: already cancelled timer")
-	ErrNotOwner         = ErrorType("timer: not owner")
-	ErrExpiredQueueFail = ErrorType("timer: expired queue fail")
+	ErrInvalidCap            = ErrorType("timer: invalid capacity")
+	ErrNil                   = ErrorType("timer: engine is nil")
+	ErrNilTimer              = ErrorType("timer: timer is nil")
+	ErrNilTimingWheel        = ErrorType("timer: timing wheel is nil")
+	ErrClosed                = ErrorType("timer: engine is closed")
+	ErrExpiredQueueFull      = ErrorType("timer: expired queue is full")
+	ErrAlreadyCancelled      = ErrorType("timer: already cancelled timer")
+	ErrNotOwner              = ErrorType("timer: not owner")
+	ErrTimeoutDeliveryFailed = ErrorType("timer: timeout delivery failed")
 )
 
 type ActionType int
@@ -68,7 +70,7 @@ type Timer struct {
 // 상한에 도달한 상태에서 Set을 호출하면 ErrExpiredQueueFull을 반환합니다.
 func New[T any](timingWheel *timingwheel.TimingWheel, capacity int) (*Engine[T], error) {
 	if timingWheel == nil {
-		return nil, ErrNil
+		return nil, ErrNilTimingWheel
 	}
 
 	if capacity <= 0 {
@@ -144,8 +146,11 @@ func (eng *Engine[T]) Set(d time.Duration, key T) (*Timer, error) {
 }
 
 func (eng *Engine[T]) Cancel(timer *Timer) error {
-	if (eng == nil) || (timer == nil) {
+	if eng == nil {
 		return ErrNil
+	}
+	if timer == nil {
+		return ErrNilTimer
 	}
 
 	c := eng.pool.Get().(*Context[T])
@@ -370,7 +375,7 @@ func (eng *Engine[T]) cancelTimer(timer *Timer) error {
 func (eng *Engine[T]) timeout(key T) error {
 	if err := eng.pq.Put(key); err != nil {
 		eng.qFail.Add(1)
-		return ErrExpiredQueueFail
+		return ErrTimeoutDeliveryFailed
 	}
 
 	return nil
