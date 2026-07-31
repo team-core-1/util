@@ -61,9 +61,19 @@ _ = pool.Put(idx) // 반납
 q, _ := pipequeue.New[int](1024)
 defer q.Close()
 
-go func() {
-    for v := range q.C() { // 소비자가 반드시 있어야 합니다
-        process(v)
+done := make(chan struct{})
+
+go func() { // 소비자가 반드시 있어야 합니다
+    for {
+        select {
+        case v, ok := <-q.C():
+            if !ok {
+                return // Close로 채널이 닫힘
+            }
+            process(v)
+        case <-done:
+            return
+        }
     }
 }()
 
@@ -71,6 +81,11 @@ if err := q.Put(1); err != nil {
     return err // ErrFull, ErrClosed
 }
 ```
+
+`select`에서 수신할 때는 **채널이 닫혔는지(`ok`)를 반드시 확인해야 합니다.**
+닫힌 채널은 계속 준비 상태가 되므로, 확인하지 않으면 제로값을 무한히 받는 바쁜 대기에 빠집니다.
+여러 큐를 한 `select`에서 다룬다면 닫힌 큐의 변수를 `nil`로 바꿔 해당 case를 비활성화하십시오.
+`C()`는 nil 리시버에서 nil 채널을 반환하므로 이 방식이 그대로 동작합니다.
 
 ### timer
 
@@ -82,9 +97,19 @@ defer tw.Stop() // timingWheel 수명은 호출 측 책임입니다
 eng, _ := timer.New[string](tw, 1000)
 defer eng.Close()
 
+done := make(chan struct{})
+
 go func() {
-    for key := range eng.C() { // 만료된 키
-        onExpire(key)
+    for {
+        select {
+        case key, ok := <-eng.C(): // 만료된 키
+            if !ok {
+                return // Close로 채널이 닫힘
+            }
+            onExpire(key)
+        case <-done:
+            return
+        }
     }
 }()
 
@@ -197,7 +222,7 @@ $ gofmt -l .
 
    [PASS] 7건
      · New(0)                    ErrInvalidCap
-     · 중복 키 Put                ErrDupKey (기존 값 보존)
+     · 중복 키 Put               ErrDupKey (기존 값 보존)
      ...
 
    결과 : 7/7 통과
