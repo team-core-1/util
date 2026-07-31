@@ -13,9 +13,9 @@ func (e ErrorType) Error() string {
 
 const (
 	ErrInvalidCap = ErrorType("pipequeue: invalid capacity")
-	ErrNil        = ErrorType("pipequeue: nil")
-	ErrClosed     = ErrorType("pipequeue: closed")
-	ErrFull       = ErrorType("pipequeue: put is full")
+	ErrNil        = ErrorType("pipequeue: queue is nil")
+	ErrClosed     = ErrorType("pipequeue: queue is closed")
+	ErrFull       = ErrorType("pipequeue: queue is full")
 )
 
 type ActionType int
