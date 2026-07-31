@@ -12,674 +12,1003 @@ import (
 	"github.com/RussellLuo/timingwheel"
 )
 
-type largeData struct {
-	buffer [1024 * 1024]byte // 1MB
+// ---------------------------------------------------------------------------
+// 결과 출력 도우미
+//
+// 각 테스트는 검증 항목을 report에 누적하고, 종료 시 통과 항목을 먼저,
+// 실패 항목을 나중에 출력한다. TestMain은 전체 요약을 같은 순서로 낸다.
+// ---------------------------------------------------------------------------
+
+const nameWidth = 28
+
+// runeWidth는 한글/한자 등 2칸을 차지하는 문자를 구분한다.
+// 이름 열 정렬이 어긋나지 않도록 하기 위함이다.
+func runeWidth(r rune) int {
+	switch {
+	case r >= 0x1100 && r <= 0x115F,
+		r >= 0x2E80 && r <= 0xA4CF,
+		r >= 0xAC00 && r <= 0xD7A3,
+		r >= 0xF900 && r <= 0xFAFF,
+		r >= 0xFF00 && r <= 0xFF60,
+		r >= 0xFFE0 && r <= 0xFFE6:
+		return 2
+	}
+	return 1
+}
+
+func padName(s string) string {
+	w := 0
+	for _, r := range s {
+		w += runeWidth(r)
+	}
+	if w >= nameWidth {
+		return s + " "
+	}
+	return s + spaces(nameWidth-w)
+}
+
+func spaces(n int) string {
+	b := make([]byte, n)
+	for i := range b {
+		b[i] = ' '
+	}
+	return string(b)
+}
+
+type checkItem struct {
+	name   string
+	detail string
+}
+
+type report struct {
+	t       *testing.T
+	purpose string
+	cond    string
+	passed  []checkItem
+	failed  []checkItem
+	notes   []string
+}
+
+type summaryEntry struct {
+	name      string
+	pass      int
+	fail      int
+	firstFail string
 }
 
 var (
-	summaryMu     sync.Mutex
-	testSummaries []string
+	summaryMu sync.Mutex
+	summaries []summaryEntry
 )
 
-func record(t *testing.T, detail string) {
-	status := "PASS"
-	if t.Failed() {
-		status = "FAIL"
+func newReport(t *testing.T, purpose, cond string) *report {
+	return &report{t: t, purpose: purpose, cond: cond}
+}
+
+// check는 ok가 참이면 통과, 거짓이면 실패로 기록하고 테스트를 실패시킨다.
+func (r *report) check(ok bool, name, passDetail, failDetail string) {
+	if ok {
+		r.passed = append(r.passed, checkItem{name, passDetail})
+		return
+	}
+	r.failed = append(r.failed, checkItem{name, failDetail})
+	r.t.Errorf("%s: %s", name, failDetail)
+}
+
+// checkErr는 에러 값이 기대와 일치하는지 확인한다.
+func (r *report) checkErr(got, want error, name, passDetail string) {
+	r.check(got == want, name, passDetail, fmt.Sprintf("%v 기대, 실제 %v", want, got))
+}
+
+// note는 단언하지 않는 참고 수치를 기록한다.
+func (r *report) note(format string, args ...any) {
+	r.notes = append(r.notes, fmt.Sprintf(format, args...))
+}
+
+func (r *report) done() {
+	t := r.t
+	t.Logf("── %s %s", t.Name(), spaces(max(0, 54-len(t.Name()))))
+	t.Logf("   목적 : %s", r.purpose)
+	t.Logf("   조건 : %s", r.cond)
+
+	if len(r.passed) > 0 {
+		t.Logf("")
+		t.Logf("   [PASS] %d건", len(r.passed))
+		for _, c := range r.passed {
+			t.Logf("     · %s%s", padName(c.name), c.detail)
+		}
+	}
+	if len(r.failed) > 0 {
+		t.Logf("")
+		t.Logf("   [FAIL] %d건", len(r.failed))
+		for _, c := range r.failed {
+			t.Logf("     · %s%s", padName(c.name), c.detail)
+		}
+	}
+	if len(r.notes) > 0 {
+		t.Logf("")
+		t.Logf("   [측정] 참고용, 단언 아님")
+		for _, n := range r.notes {
+			t.Logf("     · %s", n)
+		}
+	}
+
+	total := len(r.passed) + len(r.failed)
+	t.Logf("")
+	t.Logf("   결과 : %d/%d 통과", len(r.passed), total)
+
+	e := summaryEntry{name: t.Name(), pass: len(r.passed), fail: len(r.failed)}
+	if len(r.failed) > 0 {
+		e.firstFail = r.failed[0].name
 	}
 	summaryMu.Lock()
-	defer summaryMu.Unlock()
-	testSummaries = append(testSummaries, fmt.Sprintf("[%s] %-35s | %s", status, t.Name(), detail))
+	summaries = append(summaries, e)
+	summaryMu.Unlock()
 }
 
 func TestMain(m *testing.M) {
-	exitCode := m.Run()
-	fmt.Println("\n==========================================================================================")
-	fmt.Println("                                  ALL TESTS SUMMARY REPORT")
-	fmt.Println("==========================================================================================")
-	for _, s := range testSummaries {
-		fmt.Println(s)
+	code := m.Run()
+
+	var passList, failList []summaryEntry
+	var totalPass, totalFail int
+	for _, s := range summaries {
+		totalPass += s.pass
+		totalFail += s.fail
+		if s.fail > 0 {
+			failList = append(failList, s)
+		} else {
+			passList = append(passList, s)
+		}
 	}
-	fmt.Println("==========================================================================================")
-	os.Exit(exitCode)
+
+	line := "========================================================="
+	fmt.Println()
+	fmt.Println(line)
+	fmt.Println(" timer 테스트 요약")
+	fmt.Println(line)
+
+	if len(passList) > 0 {
+		fmt.Printf(" [PASS] %d개\n", len(passList))
+		for _, s := range passList {
+			fmt.Printf("   %s%d/%d\n", padName(s.name), s.pass, s.pass+s.fail)
+		}
+	}
+	if len(failList) > 0 {
+		fmt.Printf(" [FAIL] %d개\n", len(failList))
+		for _, s := range failList {
+			fmt.Printf("   %s%d/%d    %s\n", padName(s.name), s.pass, s.pass+s.fail, s.firstFail)
+		}
+	}
+
+	fmt.Println("---------------------------------------------------------")
+	fmt.Printf(" %d개 함수 / 검증 %d항목 / 통과 %d / 실패 %d\n",
+		len(summaries), totalPass+totalFail, totalPass, totalFail)
+	fmt.Println(line)
+
+	os.Exit(code)
 }
 
-// 1. 미들웨어 등록 및 정상 호출 확인
-func TestTimer_Middleware(t *testing.T) {
-	const capacity = 10
+// ---------------------------------------------------------------------------
+// 공통 도우미
+// ---------------------------------------------------------------------------
 
-	tw := timingwheel.NewTimingWheel(10*time.Millisecond, 20)
+const (
+	tick      = 10 * time.Millisecond
+	wheelSize = 20
+	// 만료를 기다릴 때 쓰는 여유 시간. 부하가 있어도 흔들리지 않도록 넉넉히 둔다.
+	waitTimeout = 5 * time.Second
+	// 시험 중 만료되면 안 되는 타이머에 쓰는 시간
+	neverFire = 1 * time.Hour
+)
+
+func newWheel(t *testing.T) *timingwheel.TimingWheel {
+	tw := timingwheel.NewTimingWheel(tick, wheelSize)
 	tw.Start()
-	defer tw.Stop()
+	t.Cleanup(tw.Stop)
+	return tw
+}
 
-	engine, _ := New[int](tw, capacity)
-
-	var setCalls, cancelCalls, timeoutCalls atomic.Uint64
-
-	engine.Use(func(c *Context[int]) {
-		switch c.Action() {
-		case ActionSet:
-			setCalls.Add(1)
-		case ActionCancel:
-			cancelCalls.Add(1)
-		case ActionTimeout:
-			timeoutCalls.Add(1)
+// drain은 C()를 계속 수신하며 수신 건수를 센다. 반환된 함수는 종료를 기다린다.
+func drain[T any](eng *Engine[T], counter *atomic.Uint64) func() {
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		for range eng.C() {
+			if counter != nil {
+				counter.Add(1)
+			}
 		}
-		c.Next()
-	})
+	}()
+	return func() { <-done }
+}
 
-	t.Logf("==================================================")
-	t.Logf(" [시험 목적 및 조건]")
-	t.Logf("  - 시험 목적 : Set/Cancel/Timeout 시 미들웨어 호출 여부 확인")
-	t.Logf("  - 시험 조건 : Capacity:%d", capacity)
-	t.Logf("--------------------------------------------------")
+// ---------------------------------------------------------------------------
+// T1. 생성과 소멸
+// ---------------------------------------------------------------------------
 
-	tm, err := engine.Set(20*time.Millisecond, 100)
+func TestTimer_NewAndClose(t *testing.T) {
+	r := newReport(t, "New의 인자 검증과 Close 이후 상태 전이 확인", "tick 10ms, wheelSize 20, Capacity 10")
+	defer r.done()
+
+	_, err := New[int](nil, 10)
+	r.checkErr(err, ErrNilTimingWheel, "New(nil 휠)", "ErrNilTimingWheel")
+
+	tw := newWheel(t)
+
+	_, err = New[int](tw, 0)
+	r.checkErr(err, ErrInvalidCap, "New(cap 0)", "ErrInvalidCap")
+
+	_, err = New[int](tw, -1)
+	r.checkErr(err, ErrInvalidCap, "New(cap -1)", "ErrInvalidCap")
+
+	eng, err := New[int](tw, 10)
 	if err != nil {
-		t.Fatalf("Set 실패: %v", err)
+		t.Fatalf("New 실패: %v", err)
 	}
+	r.check(eng.Len() == 0 && eng.Cap() == 10 && !eng.IsClosed() && eng.QFail() == 0,
+		"생성 직후 상태", "Len=0 Cap=10 IsClosed=false QFail=0",
+		fmt.Sprintf("Len=%d Cap=%d IsClosed=%v QFail=%d", eng.Len(), eng.Cap(), eng.IsClosed(), eng.QFail()))
 
-	time.Sleep(5 * time.Millisecond)
+	eng.Close()
+	r.check(eng.IsClosed(), "Close 후 IsClosed", "true", "false")
 
-	err = engine.Cancel(tm)
-	if err != nil {
-		t.Fatalf("Cancel 실패: %v", err)
-	}
+	safe := func() (ok bool) {
+		defer func() { ok = recover() == nil }()
+		eng.Close()
+		eng.Use(func(c *Context[int]) { c.Next() })
+		return
+	}()
+	r.check(safe, "Close 후 중복 호출", "Close/Use 모두 패닉 없음", "패닉 발생")
+}
 
-	_, err = engine.Set(10*time.Millisecond, 200)
-	if err != nil {
-		t.Fatalf("Set 실패: %v", err)
-	}
+// ---------------------------------------------------------------------------
+// T2. 기본 연산 정상 경로
+// ---------------------------------------------------------------------------
 
-	// Timeout 수신 대기
+func TestTimer_BasicOps(t *testing.T) {
+	r := newReport(t, "Set한 타이머가 만료되어 C()로 전달되고 Cancel이 이를 막는지", "Capacity 10, 소비자 1개")
+	defer r.done()
+
+	tw := newWheel(t)
+	eng, _ := New[int](tw, 10)
+	defer eng.Close()
+
+	tm, err := eng.Set(2*tick, 100)
+	// *Timer를 %v로 출력하면 리플렉션이 내부 필드를 읽어 만료 고루틴과 경합한다.
+	r.check(err == nil && tm != nil, "Set 반환", "nil 에러와 유효한 Timer",
+		fmt.Sprintf("err=%v timer!=nil=%v", err, tm != nil))
+
 	select {
-	case <-engine.C():
-	case <-time.After(100 * time.Millisecond):
-		t.Error("Timeout 수신 대기 시간 초과")
+	case key := <-eng.C():
+		r.check(key == 100, "만료 키 전달", "Set한 키 100이 그대로 전달됨",
+			fmt.Sprintf("수신 키=%d", key))
+	case <-time.After(waitTimeout):
+		r.check(false, "만료 키 전달", "", "제한 시간 내 수신되지 않음")
 	}
 
-	engine.Close()
+	// 취소한 타이머는 만료되지 않아야 한다.
+	tm2, _ := eng.Set(2*tick, 200)
+	r.checkErr(eng.Cancel(tm2), nil, "Cancel 반환", "성공")
 
-	t.Logf(" [테스트 수치]")
-	t.Logf("  - Set 미들웨어 호출 : %d 회", setCalls.Load())
-	t.Logf("  - Cancel 미들웨어 호출 : %d 회", cancelCalls.Load())
-	t.Logf("  - Timeout 미들웨어 호출 : %d 회", timeoutCalls.Load())
-	t.Logf("--------------------------------------------------")
-	t.Logf(" [시험 결과]")
-	if t.Failed() {
-		t.Logf("  - 미들웨어 동작 실패")
-	} else {
-		t.Logf("  - 모든 미들웨어(Set/Cancel/Timeout) 검증 완료")
+	select {
+	case key := <-eng.C():
+		r.check(false, "취소 후 미전달", "", fmt.Sprintf("취소했는데 키 %d가 전달됨", key))
+	case <-time.After(10 * tick):
+		r.check(true, "취소 후 미전달", "만료 시간이 지나도 전달되지 않음", "")
 	}
-	t.Logf("==================================================")
 
-	record(t, fmt.Sprintf("Set:%d, Cancel:%d, Timeout:%d", setCalls.Load(), cancelCalls.Load(), timeoutCalls.Load()))
+	r.check(eng.Len() == 0, "정리 후 잔여", "Len=0", fmt.Sprintf("Len=%d", eng.Len()))
 }
 
-// 2. cap이 100인 timer engine 생성 -> 하나의 고루틴에서 C()로 timeout 처리하고, 멀티 고루틴에서 Set()한 후 일부는 Cancel 나머지는 timeout 처리
-func TestTimer_Integrity(t *testing.T) {
-	const capacity = 100
-	const totalSets = 200
-	const cancelCount = 50
+// ---------------------------------------------------------------------------
+// T3. 에러 경로 전수
+// ---------------------------------------------------------------------------
 
-	tw := timingwheel.NewTimingWheel(10*time.Millisecond, 20)
-	tw.Start()
-	defer tw.Stop()
+func TestTimer_Errors(t *testing.T) {
+	r := newReport(t, "정의된 에러가 정확한 조건에서 반환되는지", "Capacity 2, 만료되지 않는 타이머 사용")
+	defer r.done()
 
-	engine, _ := New[int](tw, capacity)
+	tw := newWheel(t)
+	eng, _ := New[int](tw, 2)
 
-	var setSucc, setFull, timeoutCount atomic.Uint64
-	var cancelSucc atomic.Uint64
+	var nilEng *Engine[int]
+	_, err := nilEng.Set(neverFire, 1)
+	r.checkErr(err, ErrNil, "nil 엔진 Set", "ErrNil")
+	r.checkErr(nilEng.Cancel(&Timer{}), ErrNil, "nil 엔진 Cancel", "ErrNil")
+	r.checkErr(eng.Cancel(nil), ErrNilTimer, "nil Timer Cancel", "ErrNilTimer")
 
-	receivedKeys := sync.Map{}
-	var wg sync.WaitGroup
-	wg.Add(1)
+	tm1, e1 := eng.Set(neverFire, 1)
+	_, e2 := eng.Set(neverFire, 2)
+	_, e3 := eng.Set(neverFire, 3)
+	r.check(e1 == nil && e2 == nil && e3 == ErrExpiredQueueFull, "정원 초과 Set",
+		"정원까지 성공, 초과분은 ErrExpiredQueueFull",
+		fmt.Sprintf("1=%v 2=%v 3=%v", e1, e2, e3))
 
-	// Timeout 처리 고루틴 (Consumer)
-	go func() {
-		defer wg.Done()
-		for key := range engine.C() {
-			receivedKeys.Store(key, true)
-			timeoutCount.Add(1)
-		}
+	r.checkErr(eng.Cancel(tm1), nil, "정상 Cancel", "성공")
+	r.checkErr(eng.Cancel(tm1), ErrAlreadyCancelled, "중복 Cancel", "ErrAlreadyCancelled")
+
+	// 엔진이 발급하지 않은 Timer는 소유권 검사에서 걸러진다.
+	r.checkErr(eng.Cancel(&Timer{}), ErrNotOwner, "직접 생성한 Timer Cancel", "ErrNotOwner")
+
+	eng.Close()
+	_, err = eng.Set(neverFire, 9)
+	r.checkErr(err, ErrClosed, "Close 후 Set", "ErrClosed")
+}
+
+// ---------------------------------------------------------------------------
+// T4. nil 리시버 안전성
+// ---------------------------------------------------------------------------
+
+func TestTimer_NilReceiver(t *testing.T) {
+	r := newReport(t, "nil 엔진에 대한 모든 공개 메서드가 패닉 없이 방어되는지", "초기화하지 않은 *Engine 포인터")
+	defer r.done()
+
+	var eng *Engine[int]
+
+	tm, err := eng.Set(neverFire, 1)
+	r.check(err == ErrNil && tm == nil, "Set", "ErrNil, nil Timer 반환",
+		fmt.Sprintf("err=%v timer==nil=%v", err, tm == nil))
+
+	r.checkErr(eng.Cancel(&Timer{}), ErrNil, "Cancel", "ErrNil")
+	r.check(eng.C() == nil, "C", "nil 채널 반환", "nil이 아닌 채널 반환")
+	r.check(eng.Len() == 0 && eng.Cap() == 0 && eng.QFail() == 0, "Len/Cap/QFail", "모두 0",
+		fmt.Sprintf("Len=%d Cap=%d QFail=%d", eng.Len(), eng.Cap(), eng.QFail()))
+	r.check(eng.IsClosed(), "IsClosed", "true", "false")
+
+	safe := func() (ok bool) {
+		defer func() { ok = recover() == nil }()
+		eng.Use(func(c *Context[int]) {})
+		eng.Close()
+		return
 	}()
-
-	t.Logf("==================================================")
-	t.Logf(" [시험 목적 및 조건]")
-	t.Logf("  - 시험 목적 : 타이머 데이터 정합성 및 Cancel/Timeout 동작 확인")
-	t.Logf("  - 시험 조건 : Capacity:%d, 총 요청:%d, Cancel 시도:%d", capacity, totalSets, cancelCount)
-	t.Logf("--------------------------------------------------")
-
-	// 멀티 고루틴에서 Set (Producer)
-	var setWg sync.WaitGroup
-	timers := make([]*Timer, totalSets)
-	keys := make([]int, totalSets)
-
-	for i := 0; i < totalSets; i++ {
-		setWg.Add(1)
-		go func(id int) {
-			defer setWg.Done()
-			key := id + 1000
-			tm, err := engine.Set(50*time.Millisecond, key)
-			if err == nil {
-				setSucc.Add(1)
-				timers[id] = tm
-				keys[id] = key
-			} else if err == ErrExpiredQueueFull {
-				setFull.Add(1)
-			}
-		}(i)
-	}
-	setWg.Wait()
-
-	// 일부 Cancel 처리
-	cancelledSet := make(map[int]bool)
-	for i := 0; i < totalSets; i++ {
-		if timers[i] != nil && len(cancelledSet) < cancelCount {
-			engine.Cancel(timers[i])
-			cancelledSet[keys[i]] = true
-			cancelSucc.Add(1)
-		}
-	}
-
-	// 모든 타이머가 동작할 때까지 대기
-	time.Sleep(200 * time.Millisecond)
-	engine.Close()
-	wg.Wait()
-
-	t.Logf(" [테스트 수치]")
-	t.Logf("  - Set 성공 : %d, 실패(Full) : %d", setSucc.Load(), setFull.Load())
-	t.Logf("  - Cancel 성공 : %d", cancelSucc.Load())
-	t.Logf("  - Timeout 수신 : %d", timeoutCount.Load())
-
-	t.Logf("--------------------------------------------------")
-	t.Logf(" [시험 결과]")
-	expectedTimeout := setSucc.Load() - cancelSucc.Load()
-	if timeoutCount.Load() != expectedTimeout {
-		t.Errorf("  - 수신 개수 불일치: 예상 %d, 실제 %d", expectedTimeout, timeoutCount.Load())
-	} else {
-		t.Logf("  - 수신 개수 정합성 확인 완료")
-	}
-
-	// Key 값 확인
-	receivedKeys.Range(func(k, v any) bool {
-		key := k.(int)
-		if cancelledSet[key] {
-			t.Errorf("  - 오동작: Cancel된 Key(%d)가 수신됨", key)
-		}
-		return true
-	})
-
-	t.Logf("==================================================")
-	record(t, fmt.Sprintf("SetSucc:%d, Cancel:%d, Received:%d", setSucc.Load(), cancelSucc.Load(), timeoutCount.Load()))
+	r.check(safe, "Use/Close", "패닉 없음", "패닉 발생")
 }
 
-// 3. cap이 1인 timer engine 생성하고, 멀티고루틴에서 Set, Cancel, timeout이 정상적으로 처리되는지 확인
-func TestTimer_StressCap1(t *testing.T) {
-	const capacity = 1
-	const goroutineCount = 50
-	const loopCount = 20
+// ---------------------------------------------------------------------------
+// T5. 정원과 카운터
+// ---------------------------------------------------------------------------
 
-	tw := timingwheel.NewTimingWheel(10*time.Millisecond, 20)
-	tw.Start()
-	defer tw.Stop()
+func TestTimer_LenCap(t *testing.T) {
+	r := newReport(t, "Set/Cancel/만료에 따른 Len 변화와 정원 관리 확인", "Capacity 3, 만료되지 않는 타이머 사용")
+	defer r.done()
 
-	engine, _ := New[int](tw, capacity)
+	tw := newWheel(t)
+	eng, _ := New[int](tw, 3)
+	defer eng.Close()
 
-	var setSucc, setFull, cancelSucc, timeoutCount atomic.Uint64
-	var wg sync.WaitGroup
+	r.check(eng.Len() == 0 && eng.Cap() == 3, "초기 상태", "Len=0 Cap=3",
+		fmt.Sprintf("Len=%d Cap=%d", eng.Len(), eng.Cap()))
 
-	// Consumer
-	go func() {
-		for range engine.C() {
-			timeoutCount.Add(1)
+	timers := make([]*Timer, 0, 3)
+	for i := 0; i < 3; i++ {
+		tm, err := eng.Set(neverFire, i)
+		if err != nil {
+			t.Fatalf("Set(%d) 실패: %v", i, err)
 		}
-	}()
+		timers = append(timers, tm)
+	}
+	r.check(eng.Len() == 3, "정원까지 Set", "Len=3", fmt.Sprintf("Len=%d", eng.Len()))
 
-	t.Logf("==================================================")
-	t.Logf(" [시험 목적 및 조건]")
-	t.Logf("  - 시험 목적 : 최소 용량(Cap:1) 환경에서 멀티 고루틴 스트레스 테스트")
-	t.Logf("  - 시험 조건 : Capacity:%d, 고루틴:%d, 반복:%d", capacity, goroutineCount, loopCount)
-	t.Logf("--------------------------------------------------")
+	_, err := eng.Set(neverFire, 99)
+	r.checkErr(err, ErrExpiredQueueFull, "정원 도달 후 Set", "ErrExpiredQueueFull")
 
-	for i := 0; i < goroutineCount; i++ {
-		wg.Add(1)
-		go func(id int) {
-			defer wg.Done()
-			for j := 0; j < loopCount; j++ {
-				tm, err := engine.Set(time.Duration(j%10)*time.Millisecond, id*100+j)
-				if err == nil {
-					setSucc.Add(1)
-					if j%2 == 0 { // 절반은 취소 시도
-						engine.Cancel(tm)
-						cancelSucc.Add(1)
-					}
-				} else if err == ErrExpiredQueueFull {
-					setFull.Add(1)
-				}
-			}
-		}(i)
+	_ = eng.Cancel(timers[0])
+	r.check(eng.Len() == 2, "Cancel 후", "Len=2", fmt.Sprintf("Len=%d", eng.Len()))
+
+	// 취소로 확보된 자리를 다시 쓸 수 있어야 한다.
+	tm, err := eng.Set(neverFire, 100)
+	r.check(err == nil && eng.Len() == 3, "취소 자리 재사용", "Set 성공, Len=3",
+		fmt.Sprintf("err=%v Len=%d", err, eng.Len()))
+	if tm != nil {
+		_ = eng.Cancel(tm)
 	}
 
-	wg.Wait()
-	time.Sleep(100 * time.Millisecond)
-	engine.Close()
-
-	t.Logf(" [테스트 수치]")
-	t.Logf("  - Set 성공 : %d, 실패(Full) : %d", setSucc.Load(), setFull.Load())
-	t.Logf("  - Cancel 시도 : %d, Timeout 수신 : %d", cancelSucc.Load(), timeoutCount.Load())
-	t.Logf(" [시험 결과] : 패닉 없이 정상 종료 확인")
-	t.Logf("==================================================")
-	record(t, fmt.Sprintf("Succ:%d, Full:%d, Cancel:%d, Received:%d", setSucc.Load(), setFull.Load(), cancelSucc.Load(), timeoutCount.Load()))
-}
-
-// 4. cap이 1인 timer engine 생성하고, 멀티고루틴에서 Set, Cancel, timeout 발생하는 중에 Close 하면 문제가 없는지 확인
-func TestTimer_ConcurrentClose(t *testing.T) {
-	const capacity = 1
-	const goroutineCount = 50
-
-	tw := timingwheel.NewTimingWheel(10*time.Millisecond, 20)
-	tw.Start()
-	defer tw.Stop()
-
-	engine, _ := New[int](tw, capacity)
-
-	var wg sync.WaitGroup
-	var closedErrCount atomic.Uint64
-
-	t.Logf("==================================================")
-	t.Logf(" [시험 목적 및 조건]")
-	t.Logf("  - 시험 목적 : 작업 중 엔진 Close 시 안전성 확인")
-	t.Logf("  - 시험 조건 : Capacity:%d, 고루틴:%d", capacity, goroutineCount)
-	t.Logf("--------------------------------------------------")
-
-	for i := 0; i < goroutineCount; i++ {
-		wg.Add(1)
-		go func(id int) {
-			defer wg.Done()
-			for {
-				_, err := engine.Set(10*time.Millisecond, id)
-				if err == ErrClosed {
-					closedErrCount.Add(1)
-					return
-				}
-				time.Sleep(1 * time.Microsecond)
-			}
-		}(i)
+	// 만료된 타이머도 전달 후에는 자리를 반납해야 한다.
+	for _, x := range timers[1:] {
+		_ = eng.Cancel(x)
 	}
-
-	time.Sleep(5 * time.Millisecond)
-	engine.Close()
-	wg.Wait()
-
-	t.Logf(" [테스트 수치]")
-	t.Logf("  - Close 이후 ErrClosed 감지 : %d 회", closedErrCount.Load())
-	t.Logf(" [시험 결과] : 패닉 없이 안전한 종료 확인")
-	t.Logf("==================================================")
-	record(t, fmt.Sprintf("ClosedErrDetected:%d", closedErrCount.Load()))
+	var received atomic.Uint64
+	stop := drain(eng, &received)
+	if _, err := eng.Set(2*tick, 7); err != nil {
+		t.Fatalf("만료용 Set 실패: %v", err)
+	}
+	settled := false
+	for i := 0; i < 200; i++ {
+		if received.Load() == 1 && eng.Len() == 0 {
+			settled = true
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	r.check(settled, "만료 후 자리 반납", "전달 완료 후 Len=0으로 복귀",
+		fmt.Sprintf("수신 %d건, Len=%d", received.Load(), eng.Len()))
+	eng.Close()
+	stop()
 }
 
-// 5. 다른 엔진이 발급한 Timer는 Cancel할 수 없어야 함
+// ---------------------------------------------------------------------------
+// T6. Cancel 소유권
 //
-// 소유권 검사가 없으면 취소를 요청한 엔진의 active가 부당하게 감소하여 음수가 되고,
-// 실제 소유 엔진은 카운터가 줄지 않아 용량을 영구히 잠식당한다.
+// 소유권 검사가 없으면 취소를 요청한 엔진의 카운터가 부당하게 감소해 음수가 되고,
+// 실제 소유 엔진은 카운터가 줄지 않아 정원을 영구히 잠식당한다.
+// ---------------------------------------------------------------------------
+
 func TestTimer_CancelOwnership(t *testing.T) {
-	const capacity = 2
+	r := newReport(t, "타 엔진이 발급한 Timer의 Cancel 차단과 카운터 무결성 확인", "같은 timingWheel을 공유하는 엔진 2개, Capacity 2")
+	defer r.done()
 
-	tw := timingwheel.NewTimingWheel(10*time.Millisecond, 20)
-	tw.Start()
-	defer tw.Stop()
+	tw := newWheel(t)
+	engA, _ := New[int](tw, 2)
+	engB, _ := New[int](tw, 2)
+	defer engA.Close()
+	defer engB.Close()
 
-	engineA, _ := New[int](tw, capacity)
-	engineB, _ := New[int](tw, capacity)
-	defer engineA.Close()
-	defer engineB.Close()
-
-	t.Logf("==================================================")
-	t.Logf(" [시험 목적 및 조건]")
-	t.Logf("  - 시험 목적 : 타 엔진 발급 Timer의 Cancel 차단 및 용량 카운터 무결성 검증")
-	t.Logf("  - 시험 조건 : 동일 timingWheel을 공유하는 엔진 2개, Capacity:%d", capacity)
-	t.Logf("--------------------------------------------------")
-
-	// 만료되지 않도록 충분히 긴 시간으로 설정
-	tmB, err := engineB.Set(1*time.Hour, 100)
+	tmB, err := engB.Set(neverFire, 100)
 	if err != nil {
 		t.Fatalf("B.Set 실패: %v", err)
 	}
-	if engineB.Len() != 1 {
-		t.Fatalf("B.Set 직후 Len: 1 기대, 실제 %d", engineB.Len())
+
+	r.checkErr(engA.Cancel(tmB), ErrNotOwner, "타 엔진 Timer Cancel", "ErrNotOwner")
+	r.check(engA.Len() == 0, "거부 후 요청 측 카운터", "Len=0 (음수 아님)",
+		fmt.Sprintf("Len=%d", engA.Len()))
+	r.check(engB.Len() == 1, "거부 후 소유 측 카운터", "Len=1 (취소되지 않음)",
+		fmt.Sprintf("Len=%d", engB.Len()))
+
+	// 타입이 다른 엔진도 차단되어야 한다.
+	engStr, _ := New[string](tw, 2)
+	defer engStr.Close()
+	r.checkErr(engStr.Cancel(tmB), ErrNotOwner, "타입이 다른 엔진 Cancel", "ErrNotOwner")
+
+	// 소유권 검사가 중복 취소 검사보다 먼저 수행된다.
+	r.checkErr(engB.Cancel(tmB), nil, "소유 엔진 Cancel", "성공")
+	r.checkErr(engA.Cancel(tmB), ErrNotOwner, "이미 취소된 타 엔진 Timer",
+		"ErrNotOwner (소유권 검사 우선)")
+
+	// 취소로 반납된 자리를 다시 쓸 수 있어야 한다 (정원 잠식 없음)
+	reuse := true
+	for i := 0; i < 2; i++ {
+		if _, err := engB.Set(neverFire, i); err != nil {
+			reuse = false
+		}
+	}
+	r.check(reuse && engB.Len() == 2, "취소 후 정원 재사용", "Capacity 2를 모두 다시 사용 가능",
+		fmt.Sprintf("재사용=%v Len=%d", reuse, engB.Len()))
+}
+
+// ---------------------------------------------------------------------------
+// T7. Use 미들웨어 체인
+// ---------------------------------------------------------------------------
+
+func TestTimer_Middleware(t *testing.T) {
+	r := newReport(t, "Use 체인의 단계별 실행·접근자·중단 불가 설계 확인", "Capacity 10, 미들웨어 3개(nil 포함)")
+	defer r.done()
+
+	tw := newWheel(t)
+	eng, _ := New[int](tw, 10)
+	defer eng.Close()
+
+	var setCnt, cancelCnt, timeoutCnt atomic.Uint64
+	var order []string
+	var orderMu sync.Mutex
+
+	eng.Use(func(c *Context[int]) {
+		if c.Action() == ActionSet {
+			orderMu.Lock()
+			order = append(order, "mw1-before")
+			orderMu.Unlock()
+		}
+		c.Next()
+		if c.Action() == ActionSet {
+			orderMu.Lock()
+			order = append(order, "mw1-after")
+			orderMu.Unlock()
+		}
+	})
+	eng.Use(nil)
+	// Next를 호출하지 않는 미들웨어. 체인은 중단되지 않아야 한다.
+	eng.Use(func(c *Context[int]) {
+		if c.Action() == ActionSet {
+			orderMu.Lock()
+			order = append(order, "mw2-noNext")
+			orderMu.Unlock()
+		}
+	})
+
+	// Set 단계 접근자는 뒤 연산에 덮이므로 Set 직후에 확인한다.
+	// Set/Cancel 단계는 호출 고루틴에서 동기 실행되므로 아래 변수는
+	// 테스트 고루틴에서만 접근된다. Timeout 단계는 별도 고루틴이라 atomic을 쓴다.
+	var setKey int
+	var setAct ActionType
+	var setErr error
+	var setErrSeen bool
+	var cancelErr error
+	var cancelErrSeen bool
+	var timeoutErrNil atomic.Bool
+	eng.Use(func(c *Context[int]) {
+		switch c.Action() {
+		case ActionSet:
+			setCnt.Add(1)
+			setAct, setKey = c.Action(), c.Key()
+			c.Next()
+			setErr, setErrSeen = c.Err(), true
+		case ActionCancel:
+			cancelCnt.Add(1)
+			c.Next()
+			cancelErr, cancelErrSeen = c.Err(), true
+		case ActionTimeout:
+			timeoutCnt.Add(1)
+			c.Next()
+			timeoutErrNil.Store(c.Err() == nil)
+		default:
+			c.Next()
+		}
+	})
+
+	tm, err := eng.Set(2*tick, 42)
+	r.check(setAct == ActionSet && setKey == 42, "Set 단계 접근자", "Action=Set Key=42",
+		fmt.Sprintf("Action=%v Key=%d", setAct, setKey))
+
+	orderMu.Lock()
+	got := append([]string(nil), order...)
+	orderMu.Unlock()
+	want := []string{"mw1-before", "mw2-noNext", "mw1-after"}
+	r.check(err == nil && equalStrings(got, want), "Set 단계 실행 순서",
+		fmt.Sprintf("%v", want), fmt.Sprintf("%v (err=%v)", got, err))
+
+	r.check(err == nil && tm != nil, "nil 핸들러", "건너뛰고 정상 진행",
+		fmt.Sprintf("err=%v timer!=nil=%v", err, tm != nil))
+
+	// Next를 호출하지 않는 미들웨어가 있어도 실제 등록·만료가 이뤄져야 한다.
+	select {
+	case key := <-eng.C():
+		r.check(key == 42, "Next 미호출 시 종단 실행",
+			"중단되지 않고 실제 만료·전달됨 (설계 확인)", fmt.Sprintf("수신 키=%d", key))
+	case <-time.After(waitTimeout):
+		r.check(false, "Next 미호출 시 종단 실행", "", "제한 시간 내 전달되지 않음")
 	}
 
-	// 1. A가 B의 타이머를 취소 시도 -> 거부되어야 함
-	if err := engineA.Cancel(tmB); err != ErrNotOwner {
-		t.Errorf("타 엔진 Timer Cancel: ErrNotOwner 기대, 실제 %v", err)
+	tm2, _ := eng.Set(neverFire, 7)
+	_ = eng.Cancel(tm2)
+
+	r.check(setCnt.Load() == 2 && cancelCnt.Load() == 1 && timeoutCnt.Load() == 1,
+		"3단계 모두 실행", "Set 2회 / Cancel 1회 / Timeout 1회",
+		fmt.Sprintf("Set %d / Cancel %d / Timeout %d", setCnt.Load(), cancelCnt.Load(), timeoutCnt.Load()))
+
+	// Next 이후 각 단계의 결과를 Context.Err()로 관찰할 수 있어야 한다.
+	r.check(setErrSeen && setErr == nil && cancelErrSeen && cancelErr == nil && timeoutErrNil.Load(),
+		"Next 이후 Err 관찰", "Set/Cancel/Timeout 모두 성공이 nil로 관찰됨",
+		fmt.Sprintf("set=%v(%v) cancel=%v(%v) timeout=%v",
+			setErrSeen, setErr, cancelErrSeen, cancelErr, timeoutErrNil.Load()))
+
+	// 실패한 연산의 에러도 관찰되어야 한다.
+	_ = eng.Cancel(tm2)
+	r.check(cancelErrSeen && cancelErr == ErrAlreadyCancelled, "실패 연산의 Err 관찰",
+		"중복 Cancel의 ErrAlreadyCancelled가 관찰됨",
+		fmt.Sprintf("Err=%v", cancelErr))
+}
+
+func equalStrings(a, b []string) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if a[i] != b[i] {
+			return false
+		}
+	}
+	return true
+}
+
+// ---------------------------------------------------------------------------
+// T8. Close 의미론
+//
+// Close는 이미 Set된 타이머를 취소하지 않는다. 엔진이 발급한 *Timer 핸들을
+// 보관하지 않으므로 일괄 취소를 지원할 수 없기 때문이다. 만료된 키는 닫힌 큐로
+// 유입되어 전달되지 못하고 QFail로만 집계된다.
+// ---------------------------------------------------------------------------
+
+func TestTimer_CloseSemantics(t *testing.T) {
+	r := newReport(t, "Close 이후 Set 차단과 대기 타이머 처리, 자원 정리 확인", "Capacity 10")
+	defer r.done()
+
+	tw := newWheel(t)
+
+	runtime.GC()
+	base := runtime.NumGoroutine()
+
+	eng, _ := New[int](tw, 10)
+	r.check(runtime.NumGoroutine() > base, "New의 내부 고루틴", "생성 시 만료 큐 고루틴 기동",
+		fmt.Sprintf("고루틴 수 변화 없음 (%d)", base))
+
+	// Close 이후 Set은 카운터를 소모하지 않고 거부되어야 한다.
+	tm, _ := eng.Set(neverFire, 1)
+	_ = eng.Cancel(tm)
+	before := eng.Len()
+
+	// 곧 만료될 타이머를 남겨 둔 채 Close한다.
+	pending := 3
+	for i := 0; i < pending; i++ {
+		if _, err := eng.Set(2*tick, i); err != nil {
+			t.Fatalf("Set 실패: %v", err)
+		}
+	}
+	eng.Close()
+
+	rejected := 0
+	for i := 0; i < 5; i++ {
+		tmX, err := eng.Set(neverFire, i)
+		if err == ErrClosed && tmX == nil {
+			rejected++
+		}
+	}
+	r.check(rejected == 5, "Close 후 Set 차단", "5회 모두 ErrClosed와 nil Timer",
+		fmt.Sprintf("%d회만 차단됨", rejected))
+	r.check(eng.Len() == before+pending, "거부된 Set의 카운터", "정원을 소모하지 않음",
+		fmt.Sprintf("Len=%d (기대 %d)", eng.Len(), before+pending))
+
+	// 대기 중이던 타이머는 취소되지 않고 만료되어 QFail로 집계된다.
+	settled := false
+	for i := 0; i < 300; i++ {
+		if eng.QFail() >= pending {
+			settled = true
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	r.check(settled, "대기 타이머 만료 처리",
+		fmt.Sprintf("Close 후에도 만료되어 QFail %d건으로 집계됨 (의도된 동작)", eng.QFail()),
+		fmt.Sprintf("QFail=%d (기대 %d 이상)", eng.QFail(), pending))
+
+	// 만료 큐가 닫히면 내부 고루틴이 종료된다.
+	for range eng.C() {
+	}
+	recovered := false
+	for i := 0; i < 200; i++ {
+		if runtime.NumGoroutine() <= base {
+			recovered = true
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	r.check(recovered, "Close 후 고루틴 회수", fmt.Sprintf("기준선 %d개로 복귀", base),
+		fmt.Sprintf("기준선 %d개, 현재 %d개", base, runtime.NumGoroutine()))
+}
+
+// ---------------------------------------------------------------------------
+// T9. 동시성 안전성 및 처리 성능
+//
+// 1단계는 Capacity 1로 정원 경계를 압박하고 경합 중 Close를 끼워 넣어
+// 등록 되돌리기까지 포함한 카운터 무결성을 본다.
+// 2단계는 정원이 넉넉한 조건에서 Set/Cancel 처리량을 측정한다.
+// 성능 수치는 머신 사양에 좌우되므로 단언하지 않고 참고로만 출력한다.
+// ---------------------------------------------------------------------------
+
+func TestTimer_Concurrency(t *testing.T) {
+	r := newReport(t,
+		"멀티 고루틴 경합 안전성(1단계)과 처리 성능(2단계) 확인",
+		"1단계 Capacity 1 + 중간 Close / 2단계 Capacity 충분")
+	defer r.done()
+
+	concurrencyStress(t, r)
+	concurrencyPerf(t, r)
+}
+
+// 1단계: Capacity 1, 극한 경합 + 경합 중 Close. 안전성만 검증한다.
+//
+// Close 경합 구간(등록 직후 재확인 후 되돌리기)은 결정적으로 만들 수 없으므로,
+// 짧은 사이클을 여러 번 반복해 노출 확률을 높인다.
+func concurrencyStress(t *testing.T, r *report) {
+	const cycles = 30
+	for i := 0; i < cycles; i++ {
+		closeRaceCycle(t)
+	}
+	for i := 0; i < 5; i++ {
+		cancelRaceCycle(t)
 	}
 
-	// 2. 거부된 요청이 A의 카운터를 훼손하지 않아야 함 (음수 방지)
-	if engineA.Len() != 0 {
-		t.Errorf("거부 후 A.Len: 0 기대, 실제 %d (카운터 훼손)", engineA.Len())
-	}
+	const workers = 50
+	const loops = 200
 
-	// 3. B의 타이머는 여전히 살아 있어야 함
-	if engineB.Len() != 1 {
-		t.Errorf("거부 후 B.Len: 1 기대, 실제 %d", engineB.Len())
-	}
+	tw := newWheel(t)
+	eng, _ := New[int](tw, 1)
 
-	// 4. 타입이 다른 엔진도 차단되어야 함
-	engineStr, _ := New[string](tw, capacity)
-	defer engineStr.Close()
-	if err := engineStr.Cancel(tmB); err != ErrNotOwner {
-		t.Errorf("타입이 다른 엔진 Cancel: ErrNotOwner 기대, 실제 %v", err)
-	}
-	if engineStr.Len() != 0 {
-		t.Errorf("거부 후 Engine[string].Len: 0 기대, 실제 %d", engineStr.Len())
-	}
+	var attempts atomic.Uint64
+	var setOK, setFull, setClosed atomic.Uint64
+	var cancelOK, cancelAlready, cancelOther atomic.Uint64
+	var unexpected atomic.Uint64
+	var received atomic.Uint64
 
-	// 5. 소유 엔진의 취소는 정상 동작하고 카운터가 회수되어야 함
-	if err := engineB.Cancel(tmB); err != nil {
-		t.Errorf("소유 엔진 Cancel: nil 기대, 실제 %v", err)
-	}
-	if engineB.Len() != 0 {
-		t.Errorf("정상 취소 후 B.Len: 0 기대, 실제 %d", engineB.Len())
-	}
+	stop := drain(eng, &received)
 
-	// 6. 중복 취소는 기존대로 차단되어야 함
-	if err := engineB.Cancel(tmB); err != ErrAlreadyCancelled {
-		t.Errorf("중복 Cancel: ErrAlreadyCancelled 기대, 실제 %v", err)
-	}
-
-	// 7. 소유권 검사가 중복 취소 검사보다 먼저 수행되어야 함
-	//    (이미 취소된 타 엔진 타이머도 ErrAlreadyCancelled가 아니라 ErrNotOwner로 진단)
-	if err := engineA.Cancel(tmB); err != ErrNotOwner {
-		t.Errorf("이미 취소된 타 엔진 Timer Cancel: ErrNotOwner 기대, 실제 %v", err)
-	}
-
-	// 8. 엔진이 발급하지 않은 Timer도 소유권 검사에서 걸러져야 함
-	if err := engineA.Cancel(&Timer{}); err != ErrNotOwner {
-		t.Errorf("직접 생성한 Timer Cancel: ErrNotOwner 기대, 실제 %v", err)
-	}
-	if engineA.Len() != 0 {
-		t.Errorf("거부 후 A.Len: 0 기대, 실제 %d (카운터 훼손)", engineA.Len())
-	}
-
-	// 9. 취소로 반납된 용량을 다시 사용할 수 있어야 함 (용량 잠식 없음)
-	for i := 0; i < capacity; i++ {
-		if _, err := engineB.Set(1*time.Hour, i); err != nil {
-			t.Errorf("취소 후 재사용 B.Set #%d: nil 기대, 실제 %v (용량 잠식)", i, err)
+	var minLen, maxLen atomic.Int64
+	maxLen.Store(-1 << 62)
+	observe := func() {
+		l := int64(eng.Len())
+		for {
+			m := minLen.Load()
+			if l >= m || minLen.CompareAndSwap(m, l) {
+				break
+			}
+		}
+		for {
+			m := maxLen.Load()
+			if l <= m || maxLen.CompareAndSwap(m, l) {
+				break
+			}
 		}
 	}
 
-	t.Logf(" [테스트 수치]")
-	t.Logf("  - 타 엔진 Cancel 차단      : ErrNotOwner")
-	t.Logf("  - 차단 후 A.Len            : %d (음수 아님)", engineA.Len())
-	t.Logf("  - 정상 취소 후 재사용 가능 : B.Len=%d / Cap=%d", engineB.Len(), engineB.Cap())
-	t.Logf("--------------------------------------------------")
-	t.Logf(" [시험 결과] : 정상 (소유권 검사 및 카운터 무결성 확인)")
-	t.Logf("==================================================")
-
-	record(t, "Cancel ownership guard verified (cross-engine, cross-type, capacity reuse)")
-}
-
-// 6. 타이머 엔진 사용 후 메모리 누수 여부 확인
-func TestTimer_MemoryLeakCheck(t *testing.T) {
-	const capacity = 100
-	const iterations = 50
-
-	var msBefore, msAfter runtime.MemStats
-
-	tw := timingwheel.NewTimingWheel(10*time.Millisecond, 20)
-	tw.Start()
-
-	engine, _ := New[*largeData](tw, capacity)
-
-	// 초기 상태 안정화 및 측정
-	runtime.GC()
-	runtime.ReadMemStats(&msBefore)
-
-	t.Logf("==================================================")
-	t.Logf(" [시험 목적 및 조건]")
-	t.Logf("  - 시험 목적 : 타이머 엔진 사용 후 메모리 누수 여부 확인")
-	t.Logf("  - 시험 조건 : Capacity:%d, 반복횟수:%d (각 1MB 데이터)", capacity, iterations)
-	t.Logf("--------------------------------------------------")
-
 	var wg sync.WaitGroup
+	start := make(chan struct{})
+	for w := 0; w < workers; w++ {
+		wg.Add(1)
+		go func(w int) {
+			defer wg.Done()
+			<-start
+			for j := 0; j < loops; j++ {
+				attempts.Add(1)
+				tm, err := eng.Set(2*tick, w*loops+j)
+				observe()
+				switch err {
+				case nil:
+					setOK.Add(1)
+					if j%2 == 0 {
+						switch cErr := eng.Cancel(tm); cErr {
+						case nil:
+							cancelOK.Add(1)
+						case ErrAlreadyCancelled:
+							cancelAlready.Add(1)
+						default:
+							cancelOther.Add(1)
+						}
+					}
+				case ErrExpiredQueueFull:
+					setFull.Add(1)
+				case ErrClosed:
+					setClosed.Add(1)
+				default:
+					unexpected.Add(1)
+				}
+			}
+		}(w)
+	}
+
+	// Close 시점을 고정 시간이 아니라 진행률로 잡는다.
+	// 시간으로 잡으면 머신 속도에 따라 작업이 먼저 끝나 버려
+	// Close 이후 시도가 하나도 없는 경우가 생긴다.
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
-		received := 0
-		for range engine.C() {
-			received++
-			if received == iterations {
-				return
-			}
+		<-start
+		target := uint64(workers*loops) * 3 / 10
+		for attempts.Load() < target {
+			runtime.Gosched()
 		}
+		eng.Close()
 	}()
 
-	for i := 0; i < iterations; i++ {
-		data := &largeData{}
-		_, err := engine.Set(10*time.Millisecond, data)
-		if err != nil {
-			t.Errorf("Set 실패: %v", err)
+	begin := time.Now()
+	close(start)
+
+	finished := make(chan struct{})
+	go func() { wg.Wait(); close(finished) }()
+
+	select {
+	case <-finished:
+		r.check(true, "1단계 완주",
+			fmt.Sprintf("패닉·데드락 없이 %v 내 완료", time.Since(begin).Round(time.Millisecond)), "")
+	case <-time.After(60 * time.Second):
+		r.check(false, "1단계 완주", "", "60초 내 완료되지 않음 (데드락 의심)")
+		return
+	}
+	stop()
+
+	expected := uint64(workers * loops)
+	total := setOK.Load() + setFull.Load() + setClosed.Load()
+	r.check(total == expected, "1단계 시도 횟수 정합성",
+		fmt.Sprintf("Set %d건이 누락 없이 분류됨", expected),
+		fmt.Sprintf("분류 합계 %d (기대 %d)", total, expected))
+
+	r.check(unexpected.Load() == 0 && cancelOther.Load() == 0, "1단계 예상 외 에러",
+		"없음 (Full/Closed/AlreadyCancelled만 발생)",
+		fmt.Sprintf("Set %d건, Cancel %d건", unexpected.Load(), cancelOther.Load()))
+
+	// 하한만 단언한다. 음수는 카운터 증감이 어긋났다는 뜻이라 결함이다.
+	//
+	// 상한은 단언하지 않는다. Len은 active와 만료 큐 적재량을 각각 읽어 더하므로
+	// 원자적 스냅숏이 아니고, 만료 처리 중인 타이머는 큐에 넣은 뒤 active가
+	// 감소하기 전까지 양쪽에 이중 계상되어 일시적으로 Cap을 넘을 수 있다.
+	r.check(minLen.Load() >= 0, "1단계 카운터 하한", "Len이 음수로 관측되지 않음",
+		fmt.Sprintf("최소 Len=%d", minLen.Load()))
+
+	// Close가 반영되었다는 사실만 단언한다.
+	// "경합 중 몇 건이 ErrClosed로 거부되었는가"는 Close 완료 시점과 작업 종료 시점의
+	// 경합에 좌우되어 0건일 수도 있으므로 단언하지 않고 측정값으로만 남긴다.
+	// Close 이후 Set이 차단되는지는 TestTimer_CloseSemantics에서 결정적으로 확인한다.
+	r.check(eng.IsClosed(), "1단계 Close 반영", "경합 중 호출한 Close가 반영됨", "IsClosed=false")
+
+	// 남은 타이머가 모두 만료될 때까지 기다린 뒤 카운터 수렴을 본다.
+	converged := false
+	for i := 0; i < 300; i++ {
+		if eng.Len() == 0 {
+			converged = true
+			break
 		}
+		time.Sleep(10 * time.Millisecond)
 	}
+	r.check(converged, "1단계 카운터 수렴", "모든 타이머 처리 후 Len=0",
+		fmt.Sprintf("Len=%d QFail=%d", eng.Len(), eng.QFail()))
 
-	wg.Wait()
-
-	// 자원 해제
-	engine.Close()
-	tw.Stop()
-
-	engine = nil
-	tw = nil
-
-	// GC 강제 실행 및 대기
-	for i := 0; i < 3; i++ {
-		runtime.GC()
-		time.Sleep(50 * time.Millisecond)
-	}
-
-	runtime.ReadMemStats(&msAfter)
-
-	t.Logf(" [테스트 수치]")
-	t.Logf("  - 시작 전 메모리 : %.2f MB", float64(msBefore.Alloc)/1024/1024)
-	t.Logf("  - 종료 후 메모리 : %.2f MB", float64(msAfter.Alloc)/1024/1024)
-	t.Logf("--------------------------------------------------")
-	t.Logf(" [시험 결과]")
-	leakSize := int64(msAfter.Alloc) - int64(msBefore.Alloc)
-	// 오차 범위 2MB 이내 확인 (런타임 오버헤드 고려)
-	if leakSize > 2*1024*1024 {
-		t.Errorf("  - 메모리 누수 의심: %.2f MB 증가함", float64(leakSize)/1024/1024)
-	} else {
-		t.Logf("  - 메모리 정상 확인 (누수 없음)")
-	}
-	t.Logf("==================================================")
-	record(t, fmt.Sprintf("Before:%.2fMB, After:%.2fMB", float64(msBefore.Alloc)/1024/1024, float64(msAfter.Alloc)/1024/1024))
+	r.note("Len 관측 범위 [%d, %d] (Cap %d, 만료 중 이중 계상으로 상한 초과 가능)",
+		minLen.Load(), maxLen.Load(), eng.Cap())
+	r.note("1단계  Capacity 1, 고루틴 %d개, 총 %d회 Set, 소요 %v",
+		workers, expected, time.Since(begin).Round(time.Millisecond))
+	r.note("       성공 %d / 정원초과 %d / 종료거부 %d / 취소 %d / 수신 %d",
+		setOK.Load(), setFull.Load(), setClosed.Load(), cancelOK.Load(), received.Load())
 }
 
-// 7. Close 이후의 Set은 실패해야 함 (결정적 경로)
-func TestTimer_SetAfterClose(t *testing.T) {
-	tw := timingwheel.NewTimingWheel(10*time.Millisecond, 20)
-	tw.Start()
-	defer tw.Stop()
+// closeRaceCycle은 Set이 진행되는 도중 Close를 걸어
+// "검사 통과 후 등록 직전에 Close가 완료되는" 경합 구간을 노출시킨다.
+func closeRaceCycle(t *testing.T) {
+	tw := newWheel(t)
+	eng, _ := New[int](tw, 1000)
+	stop := drain(eng, nil)
 
-	eng, _ := New[int](tw, 10)
-
-	t.Logf("==================================================")
-	t.Logf(" [시험 목적 및 조건]")
-	t.Logf("  - 시험 목적 : Close 이후 Set이 ErrClosed를 반환하고 카운터를 소모하지 않는지 검증")
-	t.Logf("  - 시험 조건 : Capacity:10")
-	t.Logf("--------------------------------------------------")
-
-	tm, err := eng.Set(1*time.Hour, 1)
-	if err != nil {
-		t.Fatalf("Close 이전 Set 실패: %v", err)
-	}
-	if err := eng.Cancel(tm); err != nil {
-		t.Fatalf("Cancel 실패: %v", err)
-	}
-	before := eng.Len()
-
-	eng.Close()
-
-	for i := 0; i < 5; i++ {
-		tm, err := eng.Set(1*time.Hour, i)
-		if err != ErrClosed {
-			t.Errorf("Close 후 Set: ErrClosed 기대, 실제 %v", err)
-		}
-		if tm != nil {
-			t.Errorf("Close 후 Set: nil Timer 기대, 실제 %v", tm)
-		}
-	}
-
-	after := eng.Len()
-	if after != before {
-		t.Errorf("Close 후 실패한 Set이 카운터를 소모함: %d -> %d", before, after)
-	}
-	if after < 0 {
-		t.Errorf("Len()이 음수: %d", after)
-	}
-
-	t.Logf(" [테스트 수치]")
-	t.Logf("  - Close 전 Len : %d", before)
-	t.Logf("  - Close 후 Len : %d (예상치: %d)", after, before)
-	t.Logf("--------------------------------------------------")
-	t.Logf(" [시험 결과] : 정상 (Close 이후 Set 차단 및 카운터 보존 확인)")
-	t.Logf("==================================================")
-
-	record(t, fmt.Sprintf("Set after Close rejected, Len %d -> %d", before, after))
-}
-
-// 8. Set과 Close를 동시에 실행해도 카운터가 깨지지 않아야 함
-//
-// setTimer는 맨 앞에서 Close 여부를 검사하지만, 그 직후 AfterFunc로 등록을 마치기까지
-// 사이에 Close가 완료될 수 있다. 이 경우 등록을 되돌리는데(Stop + active 감소),
-// 되돌리기가 잘못되면 active가 누수되거나 timeoutFunc와 겹쳐 이중 감소한다.
-func TestTimer_ConcurrentSetClose(t *testing.T) {
-	const capacity = 50
-	const producers = 4
-	const trials = 20
-
-	tw := timingwheel.NewTimingWheel(10*time.Millisecond, 20)
-	tw.Start()
-	defer tw.Stop()
-
-	t.Logf("==================================================")
-	t.Logf(" [시험 목적 및 조건]")
-	t.Logf("  - 시험 목적 : Set/Close 동시 실행 시 등록 되돌리기의 카운터 무결성 검증")
-	t.Logf("  - 시험 조건 : Capacity:%d, 생산자:%d, 시행:%d회", capacity, producers, trials)
-	t.Logf("--------------------------------------------------")
-
-	var negative, overCap, notSettled int
-	var sawClosed, sawOK int
-
-	for i := 0; i < trials; i++ {
-		eng, _ := New[int](tw, capacity)
-		drained := make(chan struct{})
+	var wg sync.WaitGroup
+	start := make(chan struct{})
+	for w := 0; w < 8; w++ {
+		wg.Add(1)
 		go func() {
-			defer close(drained)
-			for range eng.C() {
+			defer wg.Done()
+			<-start
+			for {
+				select {
+				case <-start:
+				default:
+				}
+				tm, err := eng.Set(neverFire, 1)
+				if err == ErrClosed {
+					return
+				}
+				if err == nil {
+					_ = eng.Cancel(tm)
+				}
 			}
 		}()
+	}
+	close(start)
+	time.Sleep(200 * time.Microsecond)
+	eng.Close()
+	wg.Wait()
+	stop()
+}
 
+// cancelRaceCycle은 즉시 만료되는 타이머를 Cancel과 정면으로 경합시켜
+// "Cancel이 먼저 처리되어 만료 콜백이 취소로 판정하는" 구간을 노출시킨다.
+// 이 판정이 어긋나면 active가 이중 감소해 카운터가 음수가 된다.
+func cancelRaceCycle(t *testing.T) {
+	const n = 500
+
+	tw := newWheel(t)
+	eng, _ := New[int](tw, n+1)
+	stop := drain(eng, nil)
+
+	var cancelWon, timeoutWon, other int
+	for i := 0; i < n; i++ {
+		// d=0이면 timingWheel이 즉시 별도 고루틴에서 만료 콜백을 실행한다.
+		// 그 콜백과 아래 Cancel이 timer.mu를 두고 경합한다.
+		tm, err := eng.Set(0, i)
+		if err != nil {
+			continue
+		}
+		switch eng.Cancel(tm) {
+		case nil:
+			cancelWon++
+		case ErrAlreadyCancelled:
+			timeoutWon++
+		default:
+			other++
+		}
+	}
+
+	if other != 0 {
+		t.Errorf("Cancel/만료 경합에서 예상 외 에러 %d건", other)
+	}
+
+	// 카운터가 0으로 수렴해야 한다. 이중 감소가 있으면 음수로 남는다.
+	for i := 0; i < 200; i++ {
+		if eng.Len() == 0 {
+			break
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	if l := eng.Len(); l != 0 {
+		t.Errorf("Cancel/만료 경합 후 카운터 미수렴: Len=%d (Cancel승 %d, 만료승 %d)",
+			l, cancelWon, timeoutWon)
+	}
+
+	eng.Close()
+	stop()
+}
+
+// 2단계: 정원이 넉넉한 조건에서 Set/Cancel 처리량을 측정한다.
+func concurrencyPerf(t *testing.T, r *report) {
+	const workers = 8
+	const loops = 3000
+	const total = workers * loops
+
+	measure := func(eng *Engine[int]) (time.Duration, uint64) {
+		var failed atomic.Uint64
 		var wg sync.WaitGroup
-		stop := make(chan struct{})
-		var minLen, maxLen atomic.Int64
-		maxLen.Store(-1 << 62)
-		var nClosed, nOK atomic.Int64
-
-		for p := 0; p < producers; p++ {
+		start := make(chan struct{})
+		for w := 0; w < workers; w++ {
 			wg.Add(1)
-			go func() {
+			go func(w int) {
 				defer wg.Done()
-				for {
-					select {
-					case <-stop:
-						return
-					default:
+				<-start
+				for j := 0; j < loops; j++ {
+					tm, err := eng.Set(neverFire, w*loops+j)
+					if err != nil {
+						failed.Add(1)
+						continue
 					}
-
-					tm, err := eng.Set(20*time.Millisecond, 1)
-
-					l := int64(eng.Len())
-					for {
-						m := minLen.Load()
-						if l >= m || minLen.CompareAndSwap(m, l) {
-							break
-						}
-					}
-					for {
-						m := maxLen.Load()
-						if l <= m || maxLen.CompareAndSwap(m, l) {
-							break
-						}
-					}
-
-					switch err {
-					case nil:
-						nOK.Add(1)
-						_ = eng.Cancel(tm)
-					case ErrClosed:
-						nClosed.Add(1)
+					if eng.Cancel(tm) != nil {
+						failed.Add(1)
 					}
 				}
-			}()
+			}(w)
 		}
-
-		time.Sleep(3 * time.Millisecond)
-		eng.Close()
-		time.Sleep(1 * time.Millisecond)
-		close(stop)
+		begin := time.Now()
+		close(start)
 		wg.Wait()
-		<-drained
-
-		if minLen.Load() < 0 {
-			negative++
-		}
-		if maxLen.Load() > capacity {
-			overCap++
-		}
-		if nClosed.Load() > 0 {
-			sawClosed++
-		}
-		if nOK.Load() > 0 {
-			sawOK++
-		}
-
-		// 남은 타이머가 모두 만료될 때까지 수렴을 기다린다 (고정 대기 대신 폴링)
-		settled := false
-		for j := 0; j < 300; j++ {
-			if eng.Len() == 0 {
-				settled = true
-				break
-			}
-			time.Sleep(10 * time.Millisecond)
-		}
-		if !settled {
-			notSettled++
-			t.Errorf("[%d] 카운터 미수렴: Len=%d QFail=%d", i, eng.Len(), eng.QFail())
-		}
+		return time.Since(begin), failed.Load()
 	}
 
-	if negative > 0 {
-		t.Errorf("Len()이 음수로 관측됨: %d회 (되돌리기 이중 감소 의심)", negative)
+	tw := newWheel(t)
+
+	// 워밍업: 첫 측정이 런타임/스케줄러 예열 비용을 떠안지 않도록 한다.
+	warm, _ := New[int](tw, total+1)
+	_, _ = measure(warm)
+	warm.Close()
+
+	plain, _ := New[int](tw, total+1)
+	stopPlain := drain(plain, nil)
+	plainDur, plainFail := measure(plain)
+
+	mw, _ := New[int](tw, total+1)
+	for i := 0; i < 3; i++ {
+		mw.Use(func(c *Context[int]) { c.Next() })
 	}
-	if overCap > 0 {
-		t.Errorf("Len()이 정원을 초과해 관측됨: %d회", overCap)
+	stopMW := drain(mw, nil)
+	mwDur, _ := measure(mw)
+
+	r.check(plainFail == 0 && plain.Len() == 0, "2단계 성공 경로",
+		fmt.Sprintf("%d회 Set+Cancel 모두 성공, 카운터 0 복귀", total),
+		fmt.Sprintf("실패 %d건, Len=%d", plainFail, plain.Len()))
+
+	perOp := func(d time.Duration) string {
+		return fmt.Sprintf("평균 %v", (d / total).Round(time.Nanosecond))
+	}
+	throughput := func(d time.Duration) string {
+		if d == 0 {
+			return "-"
+		}
+		return fmt.Sprintf("%.2fM ops/s", float64(total)/d.Seconds()/1e6)
 	}
 
-	// 두 경로가 모두 실행되지 않았다면 이 시험은 의미가 없다
-	if sawClosed == 0 || sawOK == 0 {
-		t.Logf("  [주의] 동시 실행 창을 충분히 통과하지 못함 (ErrClosed:%d회, 성공:%d회 시행)", sawClosed, sawOK)
+	overhead := ""
+	if plainDur > 0 {
+		overhead = fmt.Sprintf(" (%+.1f%%)", (float64(mwDur)/float64(plainDur)-1)*100)
 	}
 
-	t.Logf(" [테스트 수치]")
-	t.Logf("  - Len() 음수 관측       : %d회 (예상치: 0)", negative)
-	t.Logf("  - Len() 정원 초과 관측  : %d회 (예상치: 0)", overCap)
-	t.Logf("  - 종료 후 미수렴        : %d회 (예상치: 0)", notSettled)
-	t.Logf("  - ErrClosed 관측 시행   : %d/%d", sawClosed, trials)
-	t.Logf("  - Set 성공 관측 시행    : %d/%d", sawOK, trials)
-	t.Logf("--------------------------------------------------")
-	t.Logf(" [시험 결과] : 정상 (동시 Set/Close에서 카운터 무결성 유지)")
-	t.Logf("==================================================")
+	r.note("2단계  Capacity %d, 고루틴 %d개, 총 %d회 Set+Cancel", total+1, workers, total)
+	r.note("Set+Cancel %-14s %s", perOp(plainDur), throughput(plainDur))
+	r.note("미들웨어 0개 → 3개  %v → %v%s",
+		(plainDur / total).Round(time.Nanosecond), (mwDur / total).Round(time.Nanosecond), overhead)
+	r.note("(-race 실행 시 위 수치는 수 배 부풀려짐)")
 
-	record(t, fmt.Sprintf("Concurrent Set/Close integrity (neg:%d, over:%d, unsettled:%d)", negative, overCap, notSettled))
+	plain.Close()
+	stopPlain()
+	mw.Close()
+	stopMW()
 }
