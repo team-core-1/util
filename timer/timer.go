@@ -125,6 +125,14 @@ func (eng *Engine[T]) Close() {
 	eng.pq.Close()
 }
 
+// Set은 d 시간 뒤에 만료되는 타이머를 등록하고 취소에 사용할 핸들을 반환합니다.
+// 만료되면 key가 C()로 전달됩니다.
+//
+// 보유 중인 타이머 수(대기 중 + 만료 큐 적재분)가 Cap에 도달하면 ErrExpiredQueueFull을,
+// 닫힌 엔진이면 ErrClosed를, nil 엔진이면 ErrNil을 반환하며 이때 Timer는 nil입니다.
+//
+// 반환된 *Timer는 Cancel에만 사용하십시오. 내부 상태를 만료 고루틴과 공유하므로
+// 다른 용도로 다루면 안 됩니다.
 func (eng *Engine[T]) Set(d time.Duration, key T) (*Timer, error) {
 	if eng == nil {
 		return nil, ErrNil
@@ -145,6 +153,15 @@ func (eng *Engine[T]) Set(d time.Duration, key T) (*Timer, error) {
 	return c.timer, c.err
 }
 
+// Cancel은 등록된 타이머를 취소합니다.
+// 취소에 성공하면 그 키는 C()로 전달되지 않고, 차지하던 정원이 즉시 반납됩니다.
+//
+//   - 다른 엔진이 발급했거나 직접 만든 Timer면 ErrNotOwner
+//   - 이미 취소되었거나 만료 처리가 시작된 타이머면 ErrAlreadyCancelled
+//   - nil 엔진이면 ErrNil, nil 타이머면 ErrNilTimer
+//
+// 소유권을 먼저 검사하는 이유는, 검사가 없으면 취소를 요청한 엔진의 정원 카운터가
+// 부당하게 감소해 음수가 되고, 실제 소유 엔진은 정원을 영구히 잠식당하기 때문입니다.
 func (eng *Engine[T]) Cancel(timer *Timer) error {
 	if eng == nil {
 		return ErrNil
@@ -168,6 +185,14 @@ func (eng *Engine[T]) Cancel(timer *Timer) error {
 	return c.err
 }
 
+// C는 만료된 키를 수신하는 채널을 반환합니다.
+// Set에 넘긴 key가 만료 시점에 이 채널로 전달됩니다.
+//
+// [동시성 및 주의사항]
+//   - 이 채널을 수신하는 소비자가 반드시 존재해야 합니다. 수신자가 없으면 만료된 키가
+//     만료 큐에 쌓인 채 정원을 계속 차지하고, 이후 Set은 ErrExpiredQueueFull을 반환합니다.
+//     소비를 재개하면 정원도 함께 회복됩니다.
+//   - Close 이후 채널이 닫히므로, select case에서 사용하던 엔진은 Close 후 nil로 변경해야 합니다.
 func (eng *Engine[T]) C() <-chan T {
 	if eng == nil {
 		return nil
@@ -208,6 +233,7 @@ func (eng *Engine[T]) Len() int {
 	return int(eng.active.Load()) + eng.pq.Len()
 }
 
+// Cap은 New에 지정한 정원을 반환합니다. Close 이후에도 값이 유지됩니다.
 func (eng *Engine[T]) Cap() int {
 	if eng == nil {
 		return 0
@@ -216,6 +242,7 @@ func (eng *Engine[T]) Cap() int {
 	return eng.cap
 }
 
+// IsClosed는 Close가 호출되었는지 알려줍니다. nil 엔진은 true를 반환합니다.
 func (eng *Engine[T]) IsClosed() bool {
 	if eng == nil {
 		return true
@@ -227,6 +254,11 @@ func (eng *Engine[T]) IsClosed() bool {
 	return eng.isClosed
 }
 
+// QFail은 만료되었으나 만료 큐에 넣지 못해 전달이 무산된 키의 누적 개수를 반환합니다.
+//
+// 정원 검사가 만료 큐 용량과 같은 값을 쓰므로 정상 운영 중에는 큐가 넘치지 않습니다.
+// 따라서 이 값은 실질적으로 Close 이후 만료된 타이머 수를 뜻합니다.
+// (Close는 대기 중인 타이머를 취소하지 않습니다. 자세한 내용은 Close 참고)
 func (eng *Engine[T]) QFail() int {
 	if eng == nil {
 		return 0
