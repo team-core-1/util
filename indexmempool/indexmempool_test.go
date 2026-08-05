@@ -75,11 +75,25 @@ func TestPool_BasicOps(t *testing.T) {
 	r.CheckErr(ip.Put(idx), nil, "Put", "반납 성공")
 
 	// 반납한 슬롯은 제로값으로 초기화되어 재할당된다.
-	idx2, _ := ip.Get()
+	//
+	// 반납분은 재사용 대기열 맨 뒤로 가므로, 바로 다음 Get은 다른 슬롯을 준다.
+	// 나머지를 모두 소진해 반납한 그 슬롯을 되받아야 초기화 여부를 검증할 수 있다.
 	var reused string
-	_ = ip.Access(idx2, func(m *string) { reused = *m })
-	r.Check(reused == "", "반납 후 초기화", "재할당 시 제로값",
-		fmt.Sprintf("이전 값이 남음: %q", reused))
+	reclaimed := false
+	for {
+		next, err := ip.Get()
+		if err != nil {
+			break
+		}
+		if next == idx {
+			_ = ip.Access(next, func(m *string) { reused = *m })
+			reclaimed = true
+			break
+		}
+	}
+	r.Check(reclaimed && reused == "", "반납 후 초기화",
+		fmt.Sprintf("슬롯 %d를 되받았을 때 제로값", idx),
+		fmt.Sprintf("되받음=%v, 남은 값=%q", reclaimed, reused))
 }
 
 // ---------------------------------------------------------------------------
