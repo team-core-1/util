@@ -3,7 +3,7 @@
 Go 동시성 유틸리티 모음입니다. 해시맵, 인덱스 메모리풀, 파이프 큐, 타이머, 로거 5개 패키지로 구성되며
 각각 독립적으로 import할 수 있습니다.
 
-* Go 1.25.5
+* Go 1.25.12
 * 모듈 경로: `github.com/team-core-1/util`
 * 4개 패키지(`hashmap`, `indexmempool`, `pipequeue`, `timer`)가 공통 미들웨어 구조를 공유합니다
 
@@ -99,7 +99,7 @@ defer eng.Close()
 
 done := make(chan struct{})
 
-go func() {
+go func() { // 소비자가 반드시 있어야 합니다
     for {
         select {
         case key, ok := <-eng.C(): // 만료된 키
@@ -169,7 +169,7 @@ q.Use(func(c *pipequeue.Context[int]) {
 | `hashmap` | `Do`/`DoAll`/`All` 콜백 안에서 맵의 **어떤 메서드도** 호출하지 마십시오. 읽기 메서드도 포함이며, 재귀적 읽기 잠금이 쓰기 대기자에 막혀 데드락에 빠집니다.<br>`Put`은 신규 삽입 전용입니다. 값을 바꾸려면 `Delete` 후 `Put`을 사용하며, 이 조합은 원자적이지 않습니다. |
 | `indexmempool` | `Len()`은 저장 개수가 아니라 **남은 여유 슬롯 수**입니다. 사용 중인 개수는 `Cap() - Len()`으로 구합니다. |
 | `pipequeue` | `Close` 시 큐에 남은 데이터는 폐기됩니다. 내부 고루틴이 큐를 참조하므로 `New` 이후 반드시 `Close`를 호출해야 회수됩니다. |
-| `timer` | `Close`는 대기 중인 타이머를 취소하지 않습니다. 만료된 키는 닫힌 큐로 들어가 `QFail`로만 집계됩니다. `timingWheel`의 `Start`/`Stop`은 호출 측 책임입니다. |
+| `timer` | `C()`를 수신하는 소비자가 반드시 있어야 합니다. 없으면 만료된 키가 정원을 계속 차지해 이후 `Set`이 `ErrExpiredQueueFull`을 반환합니다. 소비를 재개하면 정원도 회복됩니다.<br>`Close`는 대기 중인 타이머를 취소하지 않습니다. 만료된 키는 닫힌 큐로 들어가 `QFail`로만 집계됩니다. `timingWheel`의 `Start`/`Stop`은 호출 측 책임입니다. |
 | `logger` | 패키지 전역 상태를 다루므로 `Init`은 프로그램 시작 시 한 번만 호출하십시오. `Close`는 파일 디스크립터만 해제하며 `fsync`하지 않습니다. |
 
 ## 개발 & 테스트
