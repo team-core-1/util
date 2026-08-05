@@ -428,6 +428,36 @@ func TestQueue_CloseSemantics(t *testing.T) {
 	r.Check(settled, "Close 후 고루틴 회수",
 		fmt.Sprintf("기준선 %d개로 복귀", base),
 		fmt.Sprintf("기준선 %d개, 현재 %d개", base, runtime.NumGoroutine()))
+
+	// 위 검증은 C()를 드레인하므로, 막혀 있던 송신이 수신으로 풀려 버린다.
+	// 소비자가 아예 없는 상태에서도 회수되는지는 따로 확인해야 한다.
+	// write가 closeSig를 보지 않으면 pipe 고루틴이 송신 지점에서 영구 대기한다.
+	runtime.GC()
+	base2 := runtime.NumGoroutine()
+
+	q2, _ := New[int](4)
+	for i := 0; i < 4; i++ {
+		_ = q2.Put(i)
+	}
+	// pipe가 1건을 꺼내 무버퍼 출력 채널 송신에서 대기하도록 한다.
+	entered := enterPipe(q2)
+	if !waitSignal(r, entered, "pipe 단계 진입") {
+		return
+	}
+
+	q2.Close() // 드레인하지 않는다
+
+	settled2 := false
+	for i := 0; i < 300; i++ {
+		if runtime.NumGoroutine() <= base2 {
+			settled2 = true
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	r.Check(settled2, "소비자 없이 Close",
+		fmt.Sprintf("드레인 없이도 기준선 %d개로 복귀", base2),
+		fmt.Sprintf("고루틴 누수: 기준선 %d개, 현재 %d개", base2, runtime.NumGoroutine()))
 }
 
 // ---------------------------------------------------------------------------
