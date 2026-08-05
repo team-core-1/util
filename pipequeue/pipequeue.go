@@ -102,7 +102,11 @@ func (q *Queue[T]) Close() {
 	close(q.closeSig) // pipe 고루틴을 종료
 }
 
-// Put은 큐에 데이터를 투입합니다. 버퍼가 가득 차 있으면 대기하지 않고 즉시 ErrFull을 반환하며,
+// Put은 큐에 데이터를 투입합니다. 어느 경우에도 대기하지 않고 즉시 반환합니다.
+//
+// 아직 C()로 전달되지 않은 항목 수가 Cap에 도달하면 ErrFull을 반환합니다.
+// 여기에는 버퍼에 쌓인 항목뿐 아니라 내부 pipe 고루틴이 꺼내 전달을 시도 중인 항목도
+// 포함되므로, 버퍼에 빈자리가 있어도 ErrFull이 나올 수 있습니다. (자세한 내용은 Len 참고)
 // 닫힌 큐에는 ErrClosed를 반환합니다.
 //
 // nil 반환은 "큐에 투입 성공"을 의미할 뿐, C()로의 전달을 보장하지 않습니다.
@@ -161,6 +165,11 @@ func (q *Queue[T]) Use(handlerFunc ...HandlerFunc[T]) {
 	q.rebuildHandlers(handlerFunc...)
 }
 
+// Len은 아직 C()로 전달되지 않은 항목 수를 반환합니다.
+//
+// 버퍼에 쌓인 항목과, 내부 pipe 고루틴이 꺼내 전달을 시도 중인 항목을 함께 셉니다.
+// 후자는 버퍼에도 출력 채널에도 존재하지 않지만 아직 소비되지 않았으므로 포함합니다.
+// Put의 수용 여부도 이 값을 기준으로 판정합니다.
 func (q *Queue[T]) Len() int {
 	if q == nil {
 		return 0
@@ -169,6 +178,7 @@ func (q *Queue[T]) Len() int {
 	return int(q.len.Load())
 }
 
+// Cap은 New에 지정한 정원을 반환합니다. Close 이후에도 값이 유지됩니다.
 func (q *Queue[T]) Cap() int {
 	if q == nil {
 		return 0
@@ -178,6 +188,11 @@ func (q *Queue[T]) Cap() int {
 	return cap(q.inCh)
 }
 
+// IsFull은 Put이 ErrFull을 반환할 상태인지 알려줍니다.
+// Len과 같은 기준(전달되지 않은 항목 수)을 쓰므로 Put의 판정과 일치합니다.
+//
+// 다만 확인 시점과 Put 사이에 다른 고루틴이 끼어들 수 있으므로,
+// false를 보고 이어지는 Put이 반드시 성공한다고 가정해서는 안 됩니다.
 func (q *Queue[T]) IsFull() bool {
 	if q == nil {
 		return false
@@ -187,6 +202,7 @@ func (q *Queue[T]) IsFull() bool {
 	return int(q.len.Load()) >= cap(q.inCh)
 }
 
+// IsClosed는 Close가 호출되었는지 알려줍니다. nil 큐는 true를 반환합니다.
 func (q *Queue[T]) IsClosed() bool {
 	if q == nil {
 		return true
