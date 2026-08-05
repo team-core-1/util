@@ -23,7 +23,7 @@ type Context[T any] struct {
 // 모든 단계(Get/Put/Access/AccessLock)의 미들웨어는 해당 메서드를 호출한 고루틴에서 실행됩니다.
 // 미들웨어에서 발생한 panic은 호출 측으로 전파되므로 호출 측에서 recover할 수 있습니다.
 // 라이브러리 내부에는 recover 지점이 없습니다.
-// (단, 슬롯의 StateInUse 표시와 슬롯 락은 panic 시에도 정상 복구됩니다.)
+// (단, 슬롯의 사용 중 표시와 슬롯 락은 panic 시에도 정상 복구됩니다.)
 func (c *Context[T]) Next() {
 	c.index++
 	for c.index < len(c.handlers) {

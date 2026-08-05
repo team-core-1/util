@@ -20,12 +20,12 @@ const (
 	ErrInUseIndex        = ErrorType("indexmempool: in use index")
 )
 
-type State int
+type slotState int
 
 const (
-	StateNone  State = 0
-	StateAlloc State = 1 << (iota - 1)
-	StateInUse
+	stateNone  slotState = 0
+	stateAlloc slotState = 1 << (iota - 1)
+	stateInUse
 )
 
 type ActionType int
@@ -41,7 +41,7 @@ type HandlerFunc[T any] func(*Context[T])
 
 type slot[T any] struct {
 	mu    sync.Mutex
-	state State
+	state slotState
 	mem   T
 }
 
@@ -137,7 +137,7 @@ func (ip *Pool[T]) Put(index int) error {
 
 // Access는 할당된 슬롯의 메모리 포인터를 콜백 fn에 전달합니다. (비블로킹 방식)
 //
-// 콜백 실행 전에 슬롯 락을 해제하고 사용 중 표시(StateInUse)만 남기므로,
+// 콜백 실행 전에 슬롯 락을 해제하고 사용 중 표시만 남기므로,
 // 콜백이 오래 걸려도 다른 슬롯의 연산을 막지 않습니다.
 // 대신 같은 슬롯에 대한 중복 접근은 대기하지 않고 즉시 ErrInUseIndex로 거부됩니다.
 //
@@ -153,7 +153,7 @@ func (ip *Pool[T]) Put(index int) error {
 // [주의사항]
 //   - 콜백 fn은 슬롯 락을 잡지 않은 상태로 실행됩니다.
 //     fn에 전달된 포인터를 콜백 밖으로 반출하지 마십시오. Put 이후 다른 사용자에게 재할당됩니다.
-//   - 콜백에서 panic이 발생해도 StateInUse는 복구되지만, panic 자체는 호출 측으로 전파됩니다.
+//   - 콜백에서 panic이 발생해도 사용 중 표시는 복구되지만, panic 자체는 호출 측으로 전파됩니다.
 //   - 할당되지 않은 슬롯이면 ErrNotAllocatedIndex, 범위를 벗어난 인덱스면 ErrInvalidIndex를 반환합니다.
 func (ip *Pool[T]) Access(index int, fn func(*T)) error {
 	if ip == nil {
@@ -203,7 +203,7 @@ func (ip *Pool[T]) Access(index int, fn func(*T)) error {
 //   - 콜백 fn 안에서 같은 인덱스에 대해 Access/AccessLock/Put을 호출하면
 //     이미 자신이 슬롯 락을 쥐고 있으므로 자기 데드락에 빠집니다.
 //   - fn에 전달된 포인터를 콜백 밖으로 반출하지 마십시오. Put 이후 다른 사용자에게 재할당됩니다.
-//   - 콜백에서 panic이 발생해도 슬롯 락과 StateInUse는 복구되지만, panic 자체는 호출 측으로 전파됩니다.
+//   - 콜백에서 panic이 발생해도 슬롯 락과 사용 중 표시는 복구되지만, panic 자체는 호출 측으로 전파됩니다.
 //   - 할당되지 않은 슬롯이면 ErrNotAllocatedIndex, 범위를 벗어난 인덱스면 ErrInvalidIndex를 반환합니다.
 func (ip *Pool[T]) AccessLock(index int, fn func(*T)) error {
 	if ip == nil {
@@ -301,7 +301,7 @@ func (ip *Pool[T]) get() (int, error) {
 	case slotIndex := <-ip.q:
 		slot := &ip.slots[slotIndex]
 		slot.mu.Lock()
-		slot.state = StateAlloc
+		slot.state = stateAlloc
 		slot.mu.Unlock()
 		return slotIndex, nil
 	default:
@@ -313,15 +313,15 @@ func (ip *Pool[T]) put(index int) error {
 	slot := &ip.slots[index]
 
 	slot.mu.Lock()
-	if (slot.state & StateAlloc) != StateAlloc {
+	if (slot.state & stateAlloc) != stateAlloc {
 		slot.mu.Unlock()
 		return ErrNotAllocatedIndex
 	}
-	if (slot.state & StateInUse) == StateInUse {
+	if (slot.state & stateInUse) == stateInUse {
 		slot.mu.Unlock()
 		return ErrInUseIndex
 	}
-	slot.state = StateNone
+	slot.state = stateNone
 
 	var zero T
 	slot.mem = zero
@@ -336,21 +336,21 @@ func (ip *Pool[T]) access(index int, fn func(*T)) error {
 	slot := &ip.slots[index]
 
 	slot.mu.Lock()
-	if (slot.state & StateAlloc) != StateAlloc {
+	if (slot.state & stateAlloc) != stateAlloc {
 		slot.mu.Unlock()
 		return ErrNotAllocatedIndex
 	}
-	if (slot.state & StateInUse) == StateInUse {
+	if (slot.state & stateInUse) == stateInUse {
 		slot.mu.Unlock()
 		return ErrInUseIndex
 	}
-	slot.state |= StateInUse
+	slot.state |= stateInUse
 	slot.mu.Unlock()
 
 	// fn(&slot.mem)에서 panic 발생 시 복구
 	defer func() {
 		slot.mu.Lock()
-		slot.state &^= StateInUse
+		slot.state &^= stateInUse
 		slot.mu.Unlock()
 	}()
 
@@ -365,19 +365,19 @@ func (ip *Pool[T]) accessLock(index int, fn func(*T)) error {
 	slot.mu.Lock()
 	defer slot.mu.Unlock()
 
-	if (slot.state & StateAlloc) != StateAlloc {
+	if (slot.state & stateAlloc) != stateAlloc {
 		return ErrNotAllocatedIndex
 	}
-	if (slot.state & StateInUse) == StateInUse {
+	if (slot.state & stateInUse) == stateInUse {
 		// Access()가 락을 놓고 콜백 실행 중인 경우 도달.
-		// 이 시점에는 StateInUse의 소유자가 Access()이므로 절대 해제하면 안 됨.
+		// 이 시점에는 stateInUse의 소유자가 Access()이므로 절대 해제하면 안 됨.
 		return ErrInUseIndex
 	}
-	slot.state |= StateInUse
+	slot.state |= stateInUse
 
-	// fn(&slot.mem)에서 panic 발생 시, 이 함수가 세운 StateInUse만 복구
+	// fn(&slot.mem)에서 panic 발생 시, 이 함수가 세운 stateInUse만 복구
 	defer func() {
-		slot.state &^= StateInUse
+		slot.state &^= stateInUse
 	}()
 
 	fn(&slot.mem)
