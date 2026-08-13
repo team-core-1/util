@@ -327,15 +327,9 @@ func (hm *Map[K, V]) Len() int {
 	return len(hm.m)
 }
 
+// Cap은 New에 지정한 정원을 반환합니다. Close 이후에도 값이 유지됩니다.
 func (hm *Map[K, V]) Cap() int {
 	if hm == nil {
-		return 0
-	}
-
-	hm.mu.RLock()
-	defer hm.mu.RUnlock()
-
-	if hm.m == nil {
 		return 0
 	}
 

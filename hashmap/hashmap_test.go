@@ -37,8 +37,8 @@ func TestHashMap_NewAndClose(t *testing.T) {
 		fmt.Sprintf("Len=%d Cap=%d IsClosed=%v", hm.Len(), hm.Cap(), hm.IsClosed()))
 
 	hm.Close()
-	r.Check(hm.IsClosed() && hm.Len() == 0 && hm.Cap() == 0,
-		"Close 후 상태", "IsClosed=true Len=0 Cap=0",
+	r.Check(hm.IsClosed() && hm.Len() == 0 && hm.Cap() == 10,
+		"Close 후 상태", "IsClosed=true Len=0 Cap=10",
 		fmt.Sprintf("IsClosed=%v Len=%d Cap=%d", hm.IsClosed(), hm.Len(), hm.Cap()))
 
 	// 중복 Close와 Close 이후 부가 호출이 패닉을 내지 않아야 한다.
@@ -205,7 +205,7 @@ func TestHashMap_LenCap(t *testing.T) {
 	r.Check(hm.Cap() == 5, "삽입·삭제 중 Cap", "5로 불변", fmt.Sprintf("Cap=%d", hm.Cap()))
 
 	hm.Close()
-	r.Check(hm.Len() == 0 && hm.Cap() == 0, "Close 후", "Len=0 Cap=0",
+	r.Check(hm.Len() == 0 && hm.Cap() == 5, "Close 후", "Len=0 Cap=5",
 		fmt.Sprintf("Len=%d Cap=%d", hm.Len(), hm.Cap()))
 }
 
