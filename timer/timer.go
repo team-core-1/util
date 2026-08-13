@@ -203,6 +203,7 @@ func (eng *Engine[T]) C() <-chan T {
 
 // Use는 Set/Cancel/Timeout 연산 전후에 실행할 미들웨어를 체인에 등록합니다.
 // 여러 번 호출하면 등록한 순서대로 체인에 누적되며, nil 핸들러는 실행 시 건너뜁니다.
+// 닫힌 엔진은 더 이상 변경되지 않으므로, Close 이후의 등록은 조용히 무시됩니다.
 //
 // 등록한 미들웨어는 Set/Cancel/Timeout 단계에서 모두 실행됩니다.
 // 미들웨어는 연산을 중단하거나 취소할 수 없으며, Timeout 단계에서 발생한 panic은 복구되지 않고
@@ -271,6 +272,10 @@ func (eng *Engine[T]) QFail() int {
 }
 
 func (eng *Engine[T]) rebuildHandlers(handlerFunc ...HandlerFunc[T]) {
+	if eng.isClosed {
+		return
+	}
+
 	eng.handlers = append(eng.handlers, handlerFunc...)
 
 	// Middleware + settimer handlers

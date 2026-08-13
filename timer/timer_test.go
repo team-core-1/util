@@ -413,6 +413,18 @@ func TestTimer_Middleware(t *testing.T) {
 	r.Check(cancelErrSeen && cancelErr == ErrAlreadyCancelled, "실패 연산의 Err 관찰",
 		"중복 Cancel의 ErrAlreadyCancelled가 관찰됨",
 		fmt.Sprintf("Err=%v", cancelErr))
+
+	// 닫힌 엔진은 더 이상 변경되지 않으므로 Close 이후의 Use는 무시된다.
+	// 반면 Close 이전에 등록한 미들웨어는 그대로 남아 계속 실행된다.
+	closed, _ := New[int](tw, 10)
+	var beforeCnt, afterCnt int
+	closed.Use(func(c *Context[int]) { beforeCnt++; c.Next() })
+	closed.Close()
+	closed.Use(func(c *Context[int]) { afterCnt++; c.Next() })
+	_, _ = closed.Set(2*tick, 1)
+	r.Check(beforeCnt == 1 && afterCnt == 0, "Close 이후 Use 등록",
+		"Close 전 등록만 실행되고 이후 등록은 무시됨",
+		fmt.Sprintf("Close 전 등록 %d회 실행, 이후 등록 %d회 실행", beforeCnt, afterCnt))
 }
 
 func equalStrings(a, b []string) bool {
