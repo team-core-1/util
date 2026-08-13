@@ -512,6 +512,54 @@ func TestTimer_CloseSemantics(t *testing.T) {
 	}
 	r.Check(recovered, "Close 후 고루틴 회수", fmt.Sprintf("기준선 %d개로 복귀", base),
 		fmt.Sprintf("기준선 %d개, 현재 %d개", base, runtime.NumGoroutine()))
+
+	// 유실 경로 두 가지가 중복 없이 QFail에 합산되어야 한다.
+	//   (1) 만료에는 성공했으나 소비되기 전에 Close로 폐기된 키
+	//   (2) Close 이후 만료되어 닫힌 큐로 유입된 키
+	const discarded, expiredAfter = 2, 3
+	eng2, _ := New[int](tw, 10)
+
+	// 소비자를 두지 않으므로 만료된 키가 큐에 적재된 채 남는다.
+	for i := 0; i < discarded; i++ {
+		if _, err := eng2.Set(2*tick, i); err != nil {
+			t.Fatalf("Set 실패: %v", err)
+		}
+	}
+	// Len()은 대기 중(active)과 큐 적재분을 합산하므로 둘을 구분하지 못한다.
+	// 여기서는 "만료되어 큐에 적재된" 상태를 확인해야 하므로 큐를 직접 본다.
+	buffered := false
+	for i := 0; i < 300; i++ {
+		if eng2.pq.Len() == discarded {
+			buffered = true
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+
+	// Close 시점에 아직 대기 중일 타이머를 추가한다.
+	for i := 0; i < expiredAfter; i++ {
+		if _, err := eng2.Set(20*tick, 100+i); err != nil {
+			t.Fatalf("Set 실패: %v", err)
+		}
+	}
+
+	qBefore := eng2.QFail()
+	eng2.Close()
+	qAfterClose := eng2.QFail()
+
+	settledAll := false
+	for i := 0; i < 300; i++ {
+		if eng2.QFail() == discarded+expiredAfter {
+			settledAll = true
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	r.Check(buffered && qBefore == 0 && qAfterClose == discarded && settledAll,
+		"두 유실 경로의 QFail 합산",
+		fmt.Sprintf("Close 시 폐기 %d건 + 이후 만료 %d건 = %d건", discarded, expiredAfter, discarded+expiredAfter),
+		fmt.Sprintf("적재확인=%v Close전=%d Close직후=%d 최종=%d",
+			buffered, qBefore, qAfterClose, eng2.QFail()))
 }
 
 // ---------------------------------------------------------------------------
