@@ -405,6 +405,25 @@ func TestPool_Middleware(t *testing.T) {
 	_ = ip.Put(idx)
 	r.CheckErr(lastErr, ErrNotAllocatedIndex, "실패 연산의 Err 관찰",
 		"중복 반납의 ErrNotAllocatedIndex가 관찰됨")
+
+	// 인자 검증 실패도 다른 실패와 동일하게 체인을 거쳐야 한다.
+	// (공개 메서드에서 미리 걸러내면 감사 미들웨어가 잘못된 호출만 놓친다)
+	before := len(acts)
+	_ = ip.Put(9999)
+	r.CheckErr(lastErr, ErrInvalidIndex, "범위 밖 인덱스의 Err 관찰",
+		"Put(9999)의 ErrInvalidIndex가 관찰됨")
+
+	_ = ip.Access(9999, func(*int) {})
+	r.CheckErr(lastErr, ErrInvalidIndex, "Access 범위 밖 인덱스",
+		"Access(9999)의 ErrInvalidIndex가 관찰됨")
+
+	_ = ip.AccessLock(0, nil)
+	r.CheckErr(lastErr, ErrNilCallback, "nil 콜백의 Err 관찰",
+		"AccessLock(0, nil)의 ErrNilCallback이 관찰됨")
+
+	r.Check(len(acts)-before == 3, "검증 실패도 체인 진입",
+		"잘못된 호출 3건이 모두 미들웨어를 거침",
+		fmt.Sprintf("체인 진입 %d건 (기대 3건)", len(acts)-before))
 }
 
 func equalStrings(a, b []string) bool {

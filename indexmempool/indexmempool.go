@@ -116,10 +116,6 @@ func (ip *Pool[T]) Put(index int) error {
 		return ErrNil
 	}
 
-	if (index < 0) || (index >= len(ip.slots)) {
-		return ErrInvalidIndex
-	}
-
 	c := ip.pool.Get().(*Context[T])
 	defer func() {
 		c.reset()
@@ -158,14 +154,6 @@ func (ip *Pool[T]) Put(index int) error {
 func (ip *Pool[T]) Access(index int, fn func(*T)) error {
 	if ip == nil {
 		return ErrNil
-	}
-
-	if (index < 0) || (index >= len(ip.slots)) {
-		return ErrInvalidIndex
-	}
-
-	if fn == nil {
-		return ErrNilCallback
 	}
 
 	c := ip.pool.Get().(*Context[T])
@@ -208,14 +196,6 @@ func (ip *Pool[T]) Access(index int, fn func(*T)) error {
 func (ip *Pool[T]) AccessLock(index int, fn func(*T)) error {
 	if ip == nil {
 		return ErrNil
-	}
-
-	if (index < 0) || (index >= len(ip.slots)) {
-		return ErrInvalidIndex
-	}
-
-	if fn == nil {
-		return ErrNilCallback
 	}
 
 	c := ip.pool.Get().(*Context[T])
@@ -309,7 +289,14 @@ func (ip *Pool[T]) get() (int, error) {
 	}
 }
 
+// 인자 검증은 종단 핸들러에서 수행한다. 공개 메서드에서 미리 걸러내면
+// 그 실패는 Use로 등록한 미들웨어를 거치지 않아, 같은 "잘못된 인덱스"인데도
+// ErrInvalidIndex만 감사 대상에서 빠지는 불일치가 생긴다.
 func (ip *Pool[T]) put(index int) error {
+	if (index < 0) || (index >= len(ip.slots)) {
+		return ErrInvalidIndex
+	}
+
 	slot := &ip.slots[index]
 
 	slot.mu.Lock()
@@ -333,6 +320,13 @@ func (ip *Pool[T]) put(index int) error {
 }
 
 func (ip *Pool[T]) access(index int, fn func(*T)) error {
+	if (index < 0) || (index >= len(ip.slots)) {
+		return ErrInvalidIndex
+	}
+	if fn == nil {
+		return ErrNilCallback
+	}
+
 	slot := &ip.slots[index]
 
 	slot.mu.Lock()
@@ -360,6 +354,13 @@ func (ip *Pool[T]) access(index int, fn func(*T)) error {
 }
 
 func (ip *Pool[T]) accessLock(index int, fn func(*T)) error {
+	if (index < 0) || (index >= len(ip.slots)) {
+		return ErrInvalidIndex
+	}
+	if fn == nil {
+		return ErrNilCallback
+	}
+
 	slot := &ip.slots[index]
 
 	slot.mu.Lock()
