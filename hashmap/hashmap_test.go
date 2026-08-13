@@ -383,6 +383,18 @@ func TestHashMap_Middleware(t *testing.T) {
 	hm.Delete(7)
 	r.Check(delAct == ActionDelete, "Delete 단계 접근자", "Action=Delete",
 		fmt.Sprintf("Action=%v", delAct))
+
+	// 닫힌 맵은 더 이상 변경되지 않으므로 Close 이후의 Use는 무시된다.
+	// 반면 Close 이전에 등록한 미들웨어는 그대로 남아 계속 실행된다.
+	closed, _ := New[int, string](10)
+	var beforeCnt, afterCnt int
+	closed.Use(func(c *Context[int, string]) { beforeCnt++; c.Next() })
+	closed.Close()
+	closed.Use(func(c *Context[int, string]) { afterCnt++; c.Next() })
+	_ = closed.Put(1, "x")
+	r.Check(beforeCnt == 1 && afterCnt == 0, "Close 이후 Use 등록",
+		"Close 전 등록만 실행되고 이후 등록은 무시됨",
+		fmt.Sprintf("Close 전 등록 %d회 실행, 이후 등록 %d회 실행", beforeCnt, afterCnt))
 }
 
 func equalStrings(a, b []string) bool {

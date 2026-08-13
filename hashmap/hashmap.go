@@ -299,6 +299,7 @@ func (hm *Map[K, V]) DoAll(fn func(K, V) (int, error)) (int, error) {
 
 // Use는 Put/Get/Delete 연산 전후에 실행할 미들웨어를 체인에 등록합니다.
 // 여러 번 호출하면 등록한 순서대로 체인에 누적되며, nil 핸들러는 실행 시 건너뜁니다.
+// 닫힌 맵은 더 이상 변경되지 않으므로, Close 이후의 등록은 조용히 무시됩니다.
 //
 // 미들웨어는 연산을 중단하거나 취소할 수 없습니다. 자세한 내용은 [Context.Next]를 참고하십시오.
 func (hm *Map[K, V]) Use(handlerFunc ...HandlerFunc[K, V]) {
@@ -348,6 +349,10 @@ func (hm *Map[K, V]) IsClosed() bool {
 }
 
 func (hm *Map[K, V]) rebuildHandlers(handlerFunc ...HandlerFunc[K, V]) {
+	if hm.m == nil {
+		return
+	}
+
 	hm.handlers = append(hm.handlers, handlerFunc...)
 
 	hm.putHandlers = make([]HandlerFunc[K, V], len(hm.handlers)+1)
