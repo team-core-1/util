@@ -359,6 +359,18 @@ func TestQueue_Middleware(t *testing.T) {
 	r.Check(putErrObserved && putErrSeen == nil, "Next 이후 결과 관찰",
 		"성공한 Put의 Err이 nil로 관찰됨",
 		fmt.Sprintf("관찰 여부=%v Err=%v", putErrObserved, putErrSeen))
+
+	// 닫힌 큐는 더 이상 변경되지 않으므로 Close 이후의 Use는 무시된다.
+	// 반면 Close 이전에 등록한 미들웨어는 그대로 남아 계속 실행된다.
+	closed, _ := New[int](4)
+	var beforeCnt, afterCnt int
+	closed.Use(func(c *Context[int]) { beforeCnt++; c.Next() })
+	closed.Close()
+	closed.Use(func(c *Context[int]) { afterCnt++; c.Next() })
+	_ = closed.Put(1)
+	r.Check(beforeCnt == 1 && afterCnt == 0, "Close 이후 Use 등록",
+		"Close 전 등록만 실행되고 이후 등록은 무시됨",
+		fmt.Sprintf("Close 전 등록 %d회 실행, 이후 등록 %d회 실행", beforeCnt, afterCnt))
 }
 
 func equalStrings(a, b []string) bool {
