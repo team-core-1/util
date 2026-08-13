@@ -414,6 +414,14 @@ func TestTimer_Middleware(t *testing.T) {
 		"중복 Cancel의 ErrAlreadyCancelled가 관찰됨",
 		fmt.Sprintf("Err=%v", cancelErr))
 
+	// 인자 검증 실패도 다른 Cancel 실패와 동일하게 체인을 거쳐야 한다.
+	cancelBefore := cancelCnt.Load()
+	errNil := eng.Cancel(nil)
+	r.Check(errNil == ErrNilTimer && cancelErr == ErrNilTimer && cancelCnt.Load() == cancelBefore+1,
+		"nil 타이머의 Err 관찰",
+		"Cancel(nil)의 ErrNilTimer가 미들웨어에서 관찰됨",
+		fmt.Sprintf("반환=%v 관찰=%v 체인진입=%d회", errNil, cancelErr, cancelCnt.Load()-cancelBefore))
+
 	// 닫힌 엔진은 더 이상 변경되지 않으므로 Close 이후의 Use는 무시된다.
 	// 반면 Close 이전에 등록한 미들웨어는 그대로 남아 계속 실행된다.
 	closed, _ := New[int](tw, 10)

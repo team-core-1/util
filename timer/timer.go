@@ -172,9 +172,6 @@ func (eng *Engine[T]) Cancel(timer *Timer) error {
 	if eng == nil {
 		return ErrNil
 	}
-	if timer == nil {
-		return ErrNilTimer
-	}
 
 	c := eng.pool.Get().(*Context[T])
 	defer func() {
@@ -396,7 +393,14 @@ func (eng *Engine[T]) setTimer(d time.Duration, key T) (*Timer, error) {
 }
 
 // Cancel은 Set이 완료된 후 timeout과 경합 체크 필요
+//
+// nil 검사를 여기서 하는 이유는, 공개 메서드에서 미리 걸러내면 그 실패가
+// Use로 등록한 미들웨어를 거치지 않아 다른 Cancel 실패와 취급이 달라지기 때문이다.
 func (eng *Engine[T]) cancelTimer(timer *Timer) error {
+	if timer == nil {
+		return ErrNilTimer
+	}
+
 	timer.mu.Lock()
 	defer timer.mu.Unlock()
 
