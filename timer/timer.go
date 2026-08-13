@@ -105,7 +105,15 @@ func New[T any](timingWheel *timingwheel.TimingWheel, capacity int) (*Engine[T],
 //
 // 따라서 Close 이후에도 대기 중이던 타이머는 예정대로 만료되며,
 // 만료된 키는 닫힌 큐로 유입되어 전달되지 못하고 QFail 카운터로만 집계됩니다.
-// 개별 취소가 필요하면 Set이 반환한 *Timer를 호출 측에서 보관했다가 Close 이전에 Cancel하십시오.
+//
+// [대기 타이머가 남아 있으면 엔진도 회수되지 않습니다]
+// 만료 콜백이 엔진과 키를 참조하므로, Close 이후에도 대기 중인 타이머가 모두 만료될 때까지
+// 엔진과 만료 큐, 각 키가 메모리에 남습니다. 긴 타이머를 남긴 채 Close하면 그 시간만큼
+// 회수가 미뤄지고, 그동안 만료될 때마다 QFail만 증가합니다.
+//
+// 개별 취소가 필요하면 Set이 반환한 *Timer를 호출 측에서 보관했다가 Cancel하십시오.
+// Cancel은 Close 이후에도 동작하므로, 종료 시점에 대기 타이머를 정리해
+// 위의 지연과 QFail 증가를 막는 수단으로 쓸 수 있습니다.
 //
 // timingWheel은 외부에서 주입받은 자원이므로 Close가 정지시키지 않습니다.
 // 소유자가 직접 Stop을 호출해야 합니다.
@@ -165,6 +173,9 @@ func (eng *Engine[T]) Set(d time.Duration, key T) (*Timer, error) {
 //   - 다른 엔진이 발급했거나 직접 만든 Timer면 ErrNotOwner
 //   - 이미 취소되었거나 만료 처리가 시작된 타이머면 ErrAlreadyCancelled
 //   - nil 엔진이면 ErrNil, nil 타이머면 ErrNilTimer
+//
+// 닫힌 엔진에서도 동작합니다. Close는 대기 중인 타이머를 취소하지 않으므로,
+// 종료 후 남은 타이머를 정리하려면 Cancel이 유일한 수단입니다. (자세한 내용은 Close 참고)
 //
 // 소유권을 먼저 검사하는 이유는, 검사가 없으면 취소를 요청한 엔진의 정원 카운터가
 // 부당하게 감소해 음수가 되고, 실제 소유 엔진은 정원을 영구히 잠식당하기 때문입니다.
