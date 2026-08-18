@@ -512,12 +512,21 @@ func concurrencyStress(t *testing.T, r *testreport.Report) {
 
 	var wg sync.WaitGroup
 	start := make(chan struct{})
+	// Close는 Put 경합이 진행 중일 때 일어나야 한다. 별도 고루틴에서 시간으로 예약하면
+	// CPU가 포화된 환경에서 그 고루틴이 생산자보다 늦게 스케줄되어, 대기 시간을 시작조차
+	// 못 한 채 모든 Put이 끝나 버린다. (실측: Close 고루틴의 첫 실행 시각이 생산자 완료
+	// 시각과 일치했고, ErrClosed가 한 건도 관측되지 않았다.)
+	// 생산자 자신이 중간 지점에서 Close를 호출해 끼어드는 시점을 확정한다.
+	var closeOnce sync.Once
 	for p := 0; p < producers; p++ {
 		wg.Add(1)
 		go func(p int) {
 			defer wg.Done()
 			<-start
 			for j := 0; j < loops; j++ {
+				if j == loops/2 {
+					closeOnce.Do(q.Close)
+				}
 				switch err := q.Put(p*loops + j); err {
 				case nil:
 					putOK.Add(1)
@@ -531,14 +540,6 @@ func concurrencyStress(t *testing.T, r *testreport.Report) {
 			}
 		}(p)
 	}
-
-	wg.Add(1)
-	go func() {
-		defer wg.Done()
-		<-start
-		time.Sleep(2 * time.Millisecond)
-		q.Close()
-	}()
 
 	begin := time.Now()
 	close(start)
